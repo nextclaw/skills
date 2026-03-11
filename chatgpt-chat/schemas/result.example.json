@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "mode": "fetch-with-sources",
+  "prompt": "请整理最近一周比特币价格变化",
+  "wrapped_prompt": "请使用网页搜索能力回答以下问题，并列出主要来源：请整理最近一周比特币价格变化",
+  "answer": "...",
+  "conversationUrl": "https://chatgpt.com/c/...",
+  "title": "比特币价格趋势报告",
+  "sources": [
+    {"text": "Yahoo Finance", "href": "https://finance.yahoo.com/..."},
+    {"text": "MarketWatch", "href": "https://www.marketwatch.com/..."}
+  ],
+  "reportPath": "/opt/workspace/research/btc-weekly.md",
+  "error": null,
+  "nextStep": null
+}
