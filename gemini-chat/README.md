@@ -1,44 +1,56 @@
 # gemini-chat
 
-Local workspace skill for deterministic Gemini Web automation via OpenClaw browser.
+Deterministic single-turn Gemini Web automation skill powered by OpenClaw.
 
-## Scope
+## Capabilities
 
-Current scope:
-- single-turn ask
-- structured result output (`fetch` / `fetch-with-sources` / `search` / `report`)
-- capture Gemini Web answer text
-- separate final `answer` from Gemini thinking metadata (`thoughtLabels` / `thinking`)
-- copy-first probing with DOM fallback for answer extraction
-- deterministic browser state machine
-- structured result output for recovery / debug / extraction work
+- Single-turn ask and answer capture
+- `fetch` / `fetch-with-sources` / `search` / `report` modes
+- Structured JSON output with state/error/debug fields
+- Optional Markdown report export
 
-## Design direction
+## Prerequisites
 
-This skill should follow the same project discipline proven by `chatgpt-chat`, but it should **not** directly copy `/opt/vault/codehub/gemini/chat.py`.
+1. OpenClaw is running.
+2. `~/.openclaw/openclaw.json` is readable (or set `OPENCLAW_CONFIG`).
+3. A valid OpenClaw profile exists (default: `openclaw`).
+4. Python 3.10+ is available.
 
-Current implementation principle:
-- prefer **OpenClaw browser** capabilities first
-- use `/opt/vault/codehub/gemini` as a **reference source**, not as the default runtime
-- keep the product shape aligned with `chatgpt-chat`: mode-driven prompt wrapping + structured JSON output
-- prioritize a maintainable single-turn Gemini Web flow over heavy stealth or batch orchestration
+## Quick start
 
-## Expected stable path
+```bash
+python3 scripts/gemini_chat_runner.py \
+  --prompt "What is quantum computing?" \
+  --mode fetch-with-sources
+```
 
-Target sequence:
+## Orchestrator integration (`--stdin-json`)
 
-1. open Gemini Web
-2. detect page state / auth state
-3. find the Gemini input box
-4. input the prompt with a stable strategy
-5. submit the prompt
-6. wait for Gemini answer stabilization
-7. extract the latest answer text
-8. return structured JSON
+```bash
+cat <<'JSON' | python3 scripts/gemini_chat_runner.py --stdin-json
+{
+  "prompt": "Summarize recent AI Agent trends.",
+  "mode": "report",
+  "save_report": true,
+  "report_path": "./artifacts/gemini-agent-report.md"
+}
+JSON
+```
 
-## Current status
+## Key flags
 
-- project docs now live under `docs/projects/gemini-chat/`
-- project setup is aligned with the `chatgpt-chat` template
-- implementation is still in design / MVP-planning phase
-- next step is to define Gemini-specific state machine and submission/extraction strategy based on OpenClaw browser abilities
+- `--prompt` (required)
+- `--mode`: `fetch` | `fetch-with-sources` | `search` | `report`
+- `--conversation-url`
+- `--save-report`
+- `--report-path`
+- `--profile`
+- `--timeout-seconds`
+- `--recovery-timeout-seconds`
+- `--recovery-poll-ms`
+- `--stdin-json`
+
+## Output and exit code
+
+- stdout: JSON (`ok`, `answer`, `thinking`, `sources`, `errorCode`, `nextStep`, `debug`, ...)
+- exit code: `0` on success, `2` on failure
