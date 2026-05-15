@@ -38,6 +38,7 @@ class Request:
     recovery_timeout_seconds: int = 120
     recovery_poll_ms: int = 3000
     profile: str = DEFAULT_PROFILE
+    tab_label: str = 'gemini-monitor'
 
 
 @dataclass
@@ -66,6 +67,8 @@ class Result:
     extractionMode: Optional[str] = None
     usedClipboard: bool = False
     copyInterceptWorked: bool = False
+    browserProfile: Optional[str] = None
+    browserTarget: Optional[str] = None
     debug: dict[str, Any] = field(default_factory=dict)
 
 
@@ -105,17 +108,33 @@ class BrowserClient:
         except urllib.error.URLError as e:
             raise RuntimeError(f'Browser request failed: {e}') from e
 
-    def open_tab(self, url: str, profile: str) -> dict[str, Any]:
-        return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', {'url': url}, timeout=15)
+    def open_tab(self, url: str, profile: str, label: Optional[str] = None) -> dict[str, Any]:
+        body: dict[str, Any] = {'url': url}
+        if label:
+            body['label'] = label
+        try:
+            return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', body, timeout=15)
+        except RuntimeError as e:
+            err = str(e)
+            if label and ('label' in err.lower() or 'Browser HTTP 400' in err):
+                return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', {'url': url}, timeout=15)
+            raise
 
-    def snapshot(self, *, target_id: str, profile: str, max_chars: int = 12000, refs: str = 'aria', fmt: str = 'aria') -> dict[str, Any]:
-        q = urllib.parse.urlencode({
+    def tabs(self, profile: str) -> list[dict[str, Any]]:
+        tabs = self.request('GET', f'/tabs?profile={urllib.parse.quote(profile)}', timeout=10)
+        return [tab for tab in (tabs or {}).get('tabs', []) if isinstance(tab, dict)]
+
+    def snapshot(self, *, target_id: str, profile: str, max_chars: int = 12000, refs: str = 'aria', fmt: str = 'aria', include_urls: bool = True) -> dict[str, Any]:
+        params = {
             'targetId': target_id,
             'maxChars': str(max_chars),
             'refs': refs,
             'format': fmt,
             'profile': profile,
-        })
+        }
+        if include_urls:
+            params['urls'] = 'true'
+        q = urllib.parse.urlencode(params)
         return self.request('GET', f'/snapshot?{q}', timeout=20)
 
     def act(self, *, profile: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -189,9 +208,26 @@ def _wait(client: BrowserClient, profile: str, target_id: str, ms: int) -> None:
     client.act(profile=profile, payload={'kind': 'wait', 'targetId': target_id, 'timeMs': ms})
 
 
-def _tab_ids(client: BrowserClient, profile: str) -> list[str]:
-    tabs = client.request('GET', f'/tabs?profile={urllib.parse.quote(profile)}', timeout=10)
-    return [tab.get('targetId') for tab in (tabs or {}).get('tabs', []) if isinstance(tab, dict)]
+def _target_from_opened(opened: dict[str, Any], fallback_label: Optional[str]) -> str:
+    """Prefer OpenClaw's stable tab handles over volatile raw CDP target IDs."""
+    for key in ('suggestedTargetId', 'tabId', 'targetId', 'id', 'label'):
+        value = opened.get(key)
+        if value:
+            return str(value)
+    if fallback_label:
+        return fallback_label
+    raise RuntimeError(f'OpenClaw did not return a usable browser target: {opened}')
+
+
+def _tab_handles(client: BrowserClient, profile: str) -> tuple[list[str], list[dict[str, Any]]]:
+    tabs = client.tabs(profile)
+    handles: list[str] = []
+    for tab in tabs:
+        for key in ('suggestedTargetId', 'tabId', 'targetId', 'id', 'label'):
+            value = tab.get(key)
+            if value:
+                handles.append(str(value))
+    return handles, tabs
 
 
 def _wait_until_tab_ready(client: BrowserClient, profile: str, target_id: str, timeout_seconds: int = 8, debug: Optional[dict[str, Any]] = None) -> None:
@@ -201,9 +237,24 @@ def _wait_until_tab_ready(client: BrowserClient, profile: str, target_id: str, t
     checks: list[dict[str, Any]] = []
     while time.time() < deadline:
         try:
-            tab_ids = _tab_ids(client, profile)
-            present = target_id in tab_ids
-            checks.append({'ts': int(time.time()), 'targetId': target_id, 'present': present, 'count': len(tab_ids)})
+            tab_handles, tabs = _tab_handles(client, profile)
+            present = target_id in tab_handles
+            checks.append({
+                'ts': int(time.time()),
+                'targetId': target_id,
+                'present': present,
+                'count': len(tabs),
+                'tabs': [
+                    {
+                        'suggestedTargetId': t.get('suggestedTargetId'),
+                        'tabId': t.get('tabId'),
+                        'targetId': t.get('targetId'),
+                        'label': t.get('label'),
+                        'url': t.get('url'),
+                    }
+                    for t in tabs[-5:]
+                ],
+            })
             checks = checks[-8:]
             if not present:
                 missing_count += 1
@@ -618,13 +669,16 @@ def _wait_for_manual_recovery(client: BrowserClient, req: Request, target_id: st
 def execute_state_machine(req: Request) -> Result:
     result = Result(ok=False, mode=req.mode, prompt=req.prompt, wrapped_prompt=wrap_prompt(req))
     client = BrowserClient()
-    debug: dict[str, Any] = {'baseUrl': client.base_url}
+    result.browserProfile = req.profile
+    debug: dict[str, Any] = {'baseUrl': client.base_url, 'browserProfile': req.profile, 'tabLabel': req.tab_label}
     result.debug = debug
 
     try:
         target_url = req.conversation_url or GEMINI_URL
-        opened = client.open_tab(target_url, req.profile)
-        target_id = opened['targetId']
+        opened = client.open_tab(target_url, req.profile, req.tab_label)
+        target_id = _target_from_opened(opened, req.tab_label)
+        result.browserTarget = target_id
+        debug['openedTab'] = opened
         debug['initialTargetId'] = target_id
         debug['targetId'] = target_id
         debug['reopenedTab'] = False
@@ -634,8 +688,10 @@ def execute_state_machine(req: Request) -> Result:
             if 'tab not found' in str(ready_err).lower():
                 debug['initialReadyError'] = str(ready_err)
                 debug['reopenedTab'] = True
-                reopened = client.open_tab(target_url, req.profile)
-                target_id = reopened['targetId']
+                reopened = client.open_tab(target_url, req.profile, req.tab_label)
+                target_id = _target_from_opened(reopened, req.tab_label)
+                result.browserTarget = target_id
+                debug['reopenedTabDetails'] = reopened
                 debug['replacementTargetId'] = target_id
                 debug['targetId'] = target_id
                 _wait_until_tab_ready(client, req.profile, target_id, debug=debug)
@@ -800,6 +856,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--save-report', action='store_true')
     p.add_argument('--report-path')
     p.add_argument('--profile', default=DEFAULT_PROFILE)
+    p.add_argument('--tab-label', default='gemini-monitor')
     p.add_argument('--timeout-seconds', type=int, default=45)
     p.add_argument('--recovery-timeout-seconds', type=int, default=120)
     p.add_argument('--recovery-poll-ms', type=int, default=3000)
@@ -822,6 +879,7 @@ def build_request(args: argparse.Namespace) -> Request:
         recovery_timeout_seconds=args.recovery_timeout_seconds,
         recovery_poll_ms=args.recovery_poll_ms,
         profile=args.profile,
+        tab_label=args.tab_label,
     )
 
 

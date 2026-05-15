@@ -16,15 +16,16 @@ Current scope:
 Known reliable sequence:
 
 1. open `https://chatgpt.com/`
-2. detect page state
-3. find prompt textbox
-4. inject/type prompt
-5. wait for send button
-6. click send button
-7. assert `/c/...`
-8. wait for answer stabilization
-9. extract answer via `copy`-first, DOM-markdown fallback
-10. return structured JSON
+2. label/focus the OpenClaw tab as `chatgpt-monitor`
+3. detect page state
+4. find prompt textbox
+5. inject/type prompt
+6. wait for send button
+7. click send button
+8. assert `/c/...`
+9. wait for answer stabilization
+10. extract answer via `copy`-first, DOM-markdown fallback
+11. return structured JSON
 
 ## Runner
 
@@ -39,7 +40,8 @@ Then use a relative path:
 ```bash
 python3 scripts/chatgpt_chat_runner.py \
   --prompt "请整理最近一周比特币价格变化" \
-  --mode report
+  --mode report \
+  --tab-label chatgpt-monitor
 ```
 
 The runner is already wired to the local OpenClaw browser control service.
@@ -49,6 +51,7 @@ Current responsibilities of the runner:
 - wrap prompts by mode
 - drive the ChatGPT page state machine
 - classify page state / auth state
+- use OpenClaw stable tab labels / suggested targets instead of raw CDP target IDs where available
 - wait for recovery on blocked states
 - extract answer and visible sources
 - normalize / dedupe sources
@@ -69,7 +72,9 @@ Typical structured output includes fields such as:
   ],
   "pageState": "ready",
   "authState": "authenticated-or-unknown",
-  "extractionMode": "dom-markdown"
+  "extractionMode": "dom-markdown",
+  "browserProfile": "openclaw",
+  "browserTarget": "chatgpt-monitor"
 }
 ```
 
@@ -82,6 +87,8 @@ Typical structured output includes fields such as:
   4. DOM-markdown fallback
 - for best results, allow `chatgpt.com` to read the clipboard in the browser; otherwise the runner may fall back to DOM extraction more often
 - the runner is intentionally designed to target the **latest assistant reply** and its **bottom action bar** so future multi-turn support does not need a selector redesign
+- OpenClaw browser handles are treated as stable in this order: `suggestedTargetId` -> `tabId` -> `targetId` -> tab label
+- default tab label is `chatgpt-monitor`; override with `--tab-label` when running multiple independent sessions
 - actual user-visible notification delivery is expected to be handled by the upper orchestration layer; the runner outputs notification contract fields
 - blocked-state handling is now structured, but deeper optimization should be driven by real samples rather than guessed edge cases
 - browser-control transient issues such as `ERR_TAB_NOT_FOUND` now use a short readiness retry window before reopening the tab once

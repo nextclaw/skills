@@ -15,6 +15,7 @@ Each skill is a **self-contained** folder that implements a deterministic browse
 
 - **Self-contained**: each skill is independent with zero cross-skill dependencies
 - **Deterministic**: state machine driven, not improvised browser exploration
+- **OpenClaw browser-first**: use managed profiles, stable tab labels, `suggestedTargetId` / `tabId` handles, snapshots, and page screenshots from OpenClaw instead of maintaining a separate CDP stack
 - **Structured output**: every skill returns JSON with `ok`, `error`, `errorCode`, `nextStep`, `debug`, etc.
 - **Recovery-first**: blocked states (login walls, human verification) are detected, notified, and waited on — not silently swallowed
 - **Failure is explainable**: every failure path produces a structured error code and a human-readable next step suggestion
@@ -84,6 +85,8 @@ All runners return structured JSON to stdout. Key fields:
   "pageState": "ready",
   "authState": "authenticated-or-unknown",
   "extractionMode": "copy",
+  "browserProfile": "openclaw",
+  "browserTarget": "chatgpt-monitor",
   "partial": false,
   "nextStep": null,
   "debug": {}

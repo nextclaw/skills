@@ -10,6 +10,12 @@
     {"text": "Yahoo Finance", "href": "https://finance.yahoo.com/..."},
     {"text": "MarketWatch", "href": "https://www.marketwatch.com/..."}
   ],
+  "browserProfile": "openclaw",
+  "browserTarget": "chatgpt-monitor",
+  "pageState": "ready",
+  "authState": "authenticated-or-unknown",
+  "extractionMode": "copy",
+  "partial": false,
   "reportPath": "/opt/workspace/research/btc-weekly.md",
   "error": null,
   "nextStep": null

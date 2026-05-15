@@ -55,22 +55,25 @@ Use a stronger model only if:
 Follow this exact order whenever possible:
 
 1. Open `https://chatgpt.com/` with browser profile `openclaw`
-2. Verify page usability / login state
-3. Locate the prompt textbox
-4. Inject the prompt text
-5. Wait for `发送提示` to appear
-6. Click `发送提示`
-7. Wait for URL to switch to `/c/...`
-8. Wait for `你说：`
-9. Wait for `ChatGPT 说：`
-10. Extract answer text / markdown-ish body
-11. Extract visible source links from the assistant article when requested
-12. Return structured output
+2. Use a stable OpenClaw tab label, default `chatgpt-monitor`
+3. Prefer OpenClaw `suggestedTargetId` / `tabId` over raw CDP `targetId`
+4. Verify page usability / login state
+5. Locate the prompt textbox
+6. Inject the prompt text
+7. Wait for `发送提示` to appear
+8. Click `发送提示`
+9. Wait for URL to switch to `/c/...`
+10. Wait for `你说：`
+11. Wait for `ChatGPT 说：`
+12. Extract answer text / markdown-ish body
+13. Extract visible source links from the assistant article when requested
+14. Return structured output
 
 ## Browser profile
 
 Always prefer:
 - profile: `openclaw`
+- tab label: `chatgpt-monitor`
 
 Use the existing logged-in browser state. Do not ask the user to log in again unless the page clearly requires it.
 
@@ -230,6 +233,7 @@ Key flags:
 - `--timeout-seconds`
 - `--recovery-timeout-seconds`
 - `--recovery-poll-ms`
+- `--tab-label`
 
 The runner returns structured JSON including fields such as:
 - `ok`
@@ -240,6 +244,8 @@ The runner returns structured JSON including fields such as:
 - `pageState`
 - `authState`
 - `extractionMode`
+- `browserProfile`
+- `browserTarget`
 - `notificationNeeded`
 
 ## Practical notes
@@ -254,6 +260,7 @@ The runner returns structured JSON including fields such as:
 - For the best chance of getting native ChatGPT markdown, allow `chatgpt.com` to read the clipboard in the browser.
 - `Copy code` inside code blocks is intentionally excluded; the runner targets the copy button that lives with turn-level actions such as feedback/share/retry.
 - Browser-control transient issues such as `ERR_TAB_NOT_FOUND` now first use a short readiness retry window before reopening the tab once.
+- The runner is aligned with current OpenClaw browser guidance: stable tab labels and `suggestedTargetId` / `tabId` are preferred over volatile raw CDP target IDs.
 - Keep behavior deterministic; do not improvise browser exploration when the state machine already has a known path.
 
 ## Implementation status

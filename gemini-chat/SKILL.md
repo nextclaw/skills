@@ -80,6 +80,7 @@ Key flags:
 - `--timeout-seconds`
 - `--recovery-timeout-seconds`
 - `--recovery-poll-ms`
+- `--tab-label`
 
 The runner currently returns structured JSON including fields such as:
 - `ok`
@@ -90,6 +91,8 @@ The runner currently returns structured JSON including fields such as:
 - `errorCode`
 - `pageState`
 - `authState`
+- `browserProfile`
+- `browserTarget`
 - `notificationNeeded`
 - `partial`
 - `debug`
@@ -100,7 +103,14 @@ The runner currently returns structured JSON including fields such as:
 
 Use OpenClaw browser control with the OpenClaw-managed browser:
 - profile: `openclaw`
+- tab label: `gemini-monitor`
 - url: `https://gemini.google.com/`
+
+Prefer OpenClaw's stable target handles in this order:
+1. `suggestedTargetId`
+2. `tabId`
+3. raw `targetId`
+4. tab label
 
 ### 2) Detect page state
 

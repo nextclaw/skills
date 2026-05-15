@@ -28,17 +28,19 @@ Current implementation principle:
 Target sequence:
 
 1. open Gemini Web
-2. detect page state / auth state
-3. find the Gemini input box
-4. input the prompt with a stable strategy
-5. submit the prompt
-6. wait for Gemini answer stabilization
-7. extract the latest answer text
-8. return structured JSON
+2. label/focus the OpenClaw tab as `gemini-monitor`
+3. prefer OpenClaw `suggestedTargetId` / `tabId` handles over raw CDP target IDs
+4. detect page state / auth state
+5. find the Gemini input box
+6. input the prompt with a stable strategy
+7. submit the prompt
+8. wait for Gemini answer stabilization
+9. extract the latest answer text
+10. return structured JSON
 
 ## Current status
 
 - project docs now live under `docs/projects/gemini-chat/`
 - project setup is aligned with the `chatgpt-chat` template
-- implementation is still in design / MVP-planning phase
-- next step is to define Gemini-specific state machine and submission/extraction strategy based on OpenClaw browser abilities
+- implementation is available as a deterministic local runner
+- current implementation uses OpenClaw browser control as the primary automation surface, with stable tab-label / target-handle handling aligned to current OpenClaw browser guidance
