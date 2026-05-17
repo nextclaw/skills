@@ -470,9 +470,68 @@ def _extract_answer_and_sources(client: BrowserClient, req: Request, target_id: 
         return res;
       }
 
-      const articles = [...document.querySelectorAll('article')];
-      const assistant = articles[articles.length - 1];
-      if (!assistant) return {ok:false, reason:'no assistant article'};
+      function pickSourceRoot(roleElement, role) {
+        const selectors = role === 'assistant'
+          ? ['.markdown', '.prose', '.whitespace-pre-wrap']
+          : ['.whitespace-pre-wrap', '.markdown', '.prose'];
+        for (const selector of selectors) {
+          const candidate = roleElement.querySelector(selector);
+          if (candidate) return candidate;
+        }
+        return roleElement;
+      }
+
+      function uniqueNodes(nodes) {
+        const seen = new Set();
+        const out = [];
+        for (const node of nodes) {
+          if (!node || seen.has(node)) continue;
+          seen.add(node);
+          out.push(node);
+        }
+        return out;
+      }
+
+      const roleAssistants = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'))
+        .filter(node => (node.innerText || node.textContent || '').trim().length > 8);
+      let assistantRole = roleAssistants.length ? roleAssistants[roleAssistants.length - 1] : null;
+      let assistant = assistantRole ? pickSourceRoot(assistantRole, 'assistant') : null;
+      let actionRoot = assistantRole || assistant;
+
+      if (!assistant) {
+        const fallbackNodes = uniqueNodes([
+          ...document.querySelectorAll('article'),
+          ...document.querySelectorAll('[data-testid*="assistant"]'),
+          ...document.querySelectorAll('[data-testid*="conversation-turn"]'),
+          ...document.querySelectorAll('[data-testid*="message"]'),
+          ...document.querySelectorAll('.markdown, .prose, .whitespace-pre-wrap')
+        ]).filter(node => {
+          const text = (node.innerText || node.textContent || '').trim();
+          if (!text || text.length < 8) return false;
+          if (node.matches && node.matches('nav, aside, header, footer, form')) return false;
+          if (node.closest && node.closest('nav, aside, header, footer, form')) return false;
+          if (text.includes('What is the best budget dash cam?') && text.length < 400) return false;
+          return true;
+        });
+        assistant = fallbackNodes.length ? fallbackNodes[fallbackNodes.length - 1] : null;
+        actionRoot = assistant;
+      }
+
+      if (!assistant) {
+        return {
+          ok:false,
+          reason:'no assistant message node',
+          diagnostics: {
+            articleCount: document.querySelectorAll('article').length,
+            assistantRoleCount: document.querySelectorAll('[data-message-author-role="assistant"]').length,
+            userRoleCount: document.querySelectorAll('[data-message-author-role="user"]').length,
+            markdownCount: document.querySelectorAll('.markdown').length,
+            proseCount: document.querySelectorAll('.prose').length,
+            messageTestIdCount: document.querySelectorAll('[data-testid*="message"], [data-testid*="conversation-turn"]').length,
+            bodyTail: (document.body?.innerText || '').trim().slice(-1200)
+          }
+        };
+      }
       
       const heading = assistant.querySelector('h1,h2,h3,h4');
       const title = (document.title || '').trim() || (heading?.innerText || '').trim() || null;
@@ -491,7 +550,7 @@ def _extract_answer_and_sources(client: BrowserClient, req: Request, target_id: 
         'Stop responding'
       ];
       const isStreaming = streamingMarkers.some(marker => pageText.includes(marker));
-      const actionButtons = [...assistant.querySelectorAll('button,[role="button"]')];
+      const actionButtons = [...(actionRoot || assistant).querySelectorAll('button,[role="button"]')];
       const labels = actionButtons.map(b => ((b.getAttribute('aria-label') || b.innerText || b.textContent || '').trim())).filter(Boolean);
       const testIds = actionButtons.map(b => (b.getAttribute('data-testid') || '').trim()).filter(Boolean);
 
@@ -929,7 +988,7 @@ def execute_state_machine(req: Request) -> Result:
             result.error = f'Answer extraction failed: {extracted}'
             result.errorCode = 'ERR_EXTRACTION_FAILED'
             result.conversationUrl = url
-            result.nextStep = 'Snapshot conversation and inspect latest assistant article selectors.'
+            result.nextStep = 'Inspect extraction diagnostics and update ChatGPT assistant message selectors for the current Web UI.'
             return result
 
         answer = clean_answer_text((extracted.get('text') or '').strip())

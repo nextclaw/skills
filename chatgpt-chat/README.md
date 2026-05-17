@@ -86,7 +86,7 @@ Typical structured output includes fields such as:
   3. `writeText` interception fallback
   4. DOM-markdown fallback
 - for best results, allow `chatgpt.com` to read the clipboard in the browser; otherwise the runner may fall back to DOM extraction more often
-- the runner is intentionally designed to target the **latest assistant reply** and its **bottom action bar** so future multi-turn support does not need a selector redesign
+- the runner targets the **latest assistant reply** using multiple ChatGPT Web message structures (`article`, assistant role nodes, message test ids, and markdown containers) before falling back to diagnostics
 - Browser HTTP actions use the concrete `targetId`; the stable tab label is retained for opening and debugging
 - default tab label is `chatgpt-monitor`; override with `--tab-label` when running multiple independent sessions
 - use `--browser-base-url` only when debugging a non-default Browser HTTP port

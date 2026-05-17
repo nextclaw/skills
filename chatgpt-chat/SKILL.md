@@ -127,12 +127,12 @@ After clicking send:
 3. confirm the presence of:
    - `你说：`
    - `ChatGPT 说：`
-4. extract the latest assistant article
+4. extract the latest assistant message
 5. use `innerText` for robust text capture
 6. when visible source links are requested, collect `a[href]` elements inside the assistant article
 
 ### Extraction target
-Prefer the **latest assistant article** in the conversation region.
+Prefer the latest assistant message in the conversation region. Current ChatGPT Web builds may expose it as an `article`, a `data-message-author-role="assistant"` node, a message/testid container, or a markdown container.
 
 Return:
 - answer text
