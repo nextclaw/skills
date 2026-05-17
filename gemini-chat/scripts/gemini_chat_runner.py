@@ -12,6 +12,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -39,6 +41,7 @@ class Request:
     recovery_poll_ms: int = 3000
     profile: str = DEFAULT_PROFILE
     tab_label: str = 'gemini-monitor'
+    browser_transport: str = 'cli'
 
 
 @dataclass
@@ -73,7 +76,9 @@ class Result:
 
 
 class BrowserClient:
-    def __init__(self, config_path: Path = OPENCLAW_CONFIG):
+    def __init__(self, config_path: Path = OPENCLAW_CONFIG, transport: str = 'cli'):
+        self.transport = (os.environ.get('OPENCLAW_BROWSER_TRANSPORT') or transport or 'cli').strip().lower()
+        self.cli = os.environ.get('OPENCLAW_CLI') or shutil.which('openclaw') or 'openclaw'
         cfg = json.loads(config_path.read_text(encoding='utf-8'))
         gateway_port = int(((cfg.get('gateway') or {}).get('port')) or 18789)
         self.base_url = f'http://127.0.0.1:{gateway_port + 2}'
@@ -90,6 +95,45 @@ class BrowserClient:
         if json_body:
             headers['Content-Type'] = 'application/json'
         return headers
+
+    def _parse_cli_output(self, raw: str) -> Any:
+        text = (raw or '').strip()
+        if not text:
+            return None
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        for marker in ('{', '['):
+            idx = text.find(marker)
+            if idx >= 0:
+                try:
+                    return json.loads(text[idx:])
+                except json.JSONDecodeError:
+                    pass
+        parsed: dict[str, Any] = {'text': text}
+        for line in text.splitlines():
+            if ':' not in line:
+                continue
+            key, value = line.split(':', 1)
+            key = key.strip()
+            value = value.strip()
+            if key and value and re.match(r'^[A-Za-z][A-Za-z0-9_-]*$', key):
+                parsed[key] = value
+        return parsed
+
+    def _cli_request(self, profile: str, args: list[str], timeout: int = 20) -> Any:
+        cmd = [self.cli, 'browser', '--browser-profile', profile, '--json', *args]
+        try:
+            proc = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, check=False)
+        except FileNotFoundError as e:
+            raise RuntimeError('OpenClaw CLI is not available in PATH; set OPENCLAW_CLI or use --browser-transport http.') from e
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(f'OpenClaw browser CLI timed out: {" ".join(cmd[:4] + args[:2])}') from e
+        if proc.returncode != 0:
+            payload = (proc.stderr or proc.stdout or '').strip()
+            raise RuntimeError(f'OpenClaw browser CLI failed ({proc.returncode}): {payload}')
+        return self._parse_cli_output(proc.stdout)
 
     def request(self, method: str, path: str, body: Optional[dict[str, Any]] = None, timeout: int = 20) -> Any:
         url = f'{self.base_url}{path}'
@@ -109,6 +153,13 @@ class BrowserClient:
             raise RuntimeError(f'Browser request failed: {e}') from e
 
     def open_tab(self, url: str, profile: str, label: Optional[str] = None) -> dict[str, Any]:
+        if self.transport == 'cli':
+            opened = self._cli_request(profile, ['open', url], timeout=30)
+            if isinstance(opened, dict):
+                if label and 'label' not in opened:
+                    opened['label'] = label
+                return opened
+            return {'url': url, 'label': label, 'raw': opened}
         body: dict[str, Any] = {'url': url}
         if label:
             body['label'] = label
@@ -121,10 +172,34 @@ class BrowserClient:
             raise
 
     def tabs(self, profile: str) -> list[dict[str, Any]]:
+        if self.transport == 'cli':
+            tabs = self._cli_request(profile, ['tabs'], timeout=15)
+            if isinstance(tabs, list):
+                return [tab for tab in tabs if isinstance(tab, dict)]
+            if isinstance(tabs, dict):
+                value = tabs.get('tabs') or tabs.get('items') or []
+                return [tab for tab in value if isinstance(tab, dict)]
+            return []
         tabs = self.request('GET', f'/tabs?profile={urllib.parse.quote(profile)}', timeout=10)
         return [tab for tab in (tabs or {}).get('tabs', []) if isinstance(tab, dict)]
 
     def snapshot(self, *, target_id: str, profile: str, max_chars: int = 12000, refs: str = 'aria', fmt: str = 'aria', include_urls: bool = True) -> dict[str, Any]:
+        if self.transport == 'cli':
+            if target_id:
+                self._cli_request(profile, ['focus', target_id], timeout=10)
+            args = ['snapshot', '--format', fmt]
+            if include_urls:
+                args.append('--urls')
+            snap = self._cli_request(profile, args, timeout=30)
+            if not isinstance(snap, dict):
+                snap = {'text': snap}
+            try:
+                href = self.act(profile=profile, payload={'kind': 'evaluate', 'targetId': target_id, 'fn': '() => location.href'})
+                if isinstance(href, dict):
+                    snap['url'] = href.get('result') or href.get('value') or href.get('returnValue')
+            except Exception as e:
+                snap['urlError'] = str(e)
+            return snap
         params = {
             'targetId': target_id,
             'maxChars': str(max_chars),
@@ -138,9 +213,26 @@ class BrowserClient:
         return self.request('GET', f'/snapshot?{q}', timeout=20)
 
     def act(self, *, profile: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self.transport == 'cli':
+            target_id = str(payload.get('targetId') or '')
+            if target_id:
+                self._cli_request(profile, ['focus', target_id], timeout=10)
+            kind = payload.get('kind')
+            if kind == 'wait':
+                time.sleep(max(0, int(payload.get('timeMs') or 0)) / 1000)
+                return {'ok': True}
+            if kind == 'evaluate':
+                out = self._cli_request(profile, ['evaluate', '--fn', str(payload.get('fn') or '')], timeout=30)
+                if isinstance(out, dict):
+                    return out
+                return {'result': out}
+            raise RuntimeError(f'Unsupported OpenClaw CLI browser action kind: {kind}')
         return self.request('POST', f'/act?profile={urllib.parse.quote(profile)}', payload, timeout=20)
 
     def close_tab(self, target_id: str, profile: str) -> None:
+        if self.transport == 'cli':
+            self._cli_request(profile, ['close', target_id], timeout=10)
+            return
         self.request('DELETE', f'/tabs/{urllib.parse.quote(target_id)}?profile={urllib.parse.quote(profile)}', timeout=10)
 
 
@@ -201,7 +293,11 @@ def save_report(result: Result, requested_path: Optional[str]) -> str:
 
 def _evaluate(client: BrowserClient, profile: str, target_id: str, fn: str) -> Any:
     resp = client.act(profile=profile, payload={'kind': 'evaluate', 'targetId': target_id, 'fn': fn})
-    return resp.get('result') if isinstance(resp, dict) else resp
+    if isinstance(resp, dict):
+        for key in ('result', 'value', 'returnValue'):
+            if key in resp:
+                return resp.get(key)
+    return resp
 
 
 def _wait(client: BrowserClient, profile: str, target_id: str, ms: int) -> None:
@@ -668,9 +764,9 @@ def _wait_for_manual_recovery(client: BrowserClient, req: Request, target_id: st
 
 def execute_state_machine(req: Request) -> Result:
     result = Result(ok=False, mode=req.mode, prompt=req.prompt, wrapped_prompt=wrap_prompt(req))
-    client = BrowserClient()
+    client = BrowserClient(transport=req.browser_transport)
     result.browserProfile = req.profile
-    debug: dict[str, Any] = {'baseUrl': client.base_url, 'browserProfile': req.profile, 'tabLabel': req.tab_label}
+    debug: dict[str, Any] = {'baseUrl': client.base_url, 'browserTransport': client.transport, 'browserProfile': req.profile, 'tabLabel': req.tab_label}
     result.debug = debug
 
     try:
@@ -841,6 +937,9 @@ def execute_state_machine(req: Request) -> Result:
         if 'tab not found' in msg.lower():
             result.errorCode = 'ERR_TAB_NOT_FOUND'
             result.nextStep = 'Retry the run; the Gemini browser tab was closed or invalidated during execution.'
+        elif 'Browser HTTP 401' in msg or 'Unauthorized' in msg:
+            result.errorCode = 'ERR_BROWSER_UNAUTHORIZED'
+            result.nextStep = 'Use the default OpenClaw CLI browser transport, or provide the current Browser HTTP shared-secret before using --browser-transport http.'
         elif not result.errorCode:
             result.errorCode = 'ERR_UNKNOWN_BLOCKED_STATE'
             result.nextStep = 'Inspect local browser control service and Gemini DOM state.'
@@ -857,6 +956,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--report-path')
     p.add_argument('--profile', default=DEFAULT_PROFILE)
     p.add_argument('--tab-label', default='gemini-monitor')
+    p.add_argument('--browser-transport', default='cli', choices=['cli', 'http'])
     p.add_argument('--timeout-seconds', type=int, default=45)
     p.add_argument('--recovery-timeout-seconds', type=int, default=120)
     p.add_argument('--recovery-poll-ms', type=int, default=3000)
@@ -880,6 +980,7 @@ def build_request(args: argparse.Namespace) -> Request:
         recovery_poll_ms=args.recovery_poll_ms,
         profile=args.profile,
         tab_label=args.tab_label,
+        browser_transport=args.browser_transport,
     )
 
 

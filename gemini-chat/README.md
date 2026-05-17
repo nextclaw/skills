@@ -43,4 +43,5 @@ Target sequence:
 - project docs now live under `docs/projects/gemini-chat/`
 - project setup is aligned with the `chatgpt-chat` template
 - implementation is available as a deterministic local runner
-- current implementation uses OpenClaw browser control as the primary automation surface, with stable tab-label / target-handle handling aligned to current OpenClaw browser guidance
+- current implementation uses the `openclaw browser` CLI as the default transport, with stable tab-label / target-handle handling aligned to current OpenClaw browser guidance
+- direct loopback Browser HTTP is available only through `--browser-transport http` for environments that explicitly manage the shared-secret token
