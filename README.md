@@ -15,7 +15,7 @@ Each skill is a **self-contained** folder that implements a deterministic browse
 
 - **Self-contained**: each skill is independent with zero cross-skill dependencies
 - **Deterministic**: state machine driven, not improvised browser exploration
-- **OpenClaw browser-first**: use managed profiles, stable tab labels, `suggestedTargetId` / `tabId` handles, snapshots, and page screenshots from OpenClaw instead of maintaining a separate CDP stack
+- **OpenClaw browser-first**: use managed profiles, stable tab labels for opening/finding tabs, and concrete `targetId` values for Browser HTTP actions
 - **HTTP loopback transport**: default to OpenClaw's Browser HTTP control surface; credentials can come from env, flags, or `openclaw.json`
 - **Structured output**: every skill returns JSON with `ok`, `error`, `errorCode`, `nextStep`, `debug`, etc.
 - **Recovery-first**: blocked states (login walls, human verification) are detected, notified, and waited on — not silently swallowed

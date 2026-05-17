@@ -51,7 +51,7 @@ Current responsibilities of the runner:
 - wrap prompts by mode
 - drive the ChatGPT page state machine
 - classify page state / auth state
-- use OpenClaw stable tab labels / suggested targets instead of raw CDP target IDs where available
+- use OpenClaw stable tab labels for open/find, then concrete CDP `targetId` for Browser HTTP actions
 - wait for recovery on blocked states
 - extract answer and visible sources
 - normalize / dedupe sources
@@ -87,7 +87,7 @@ Typical structured output includes fields such as:
   4. DOM-markdown fallback
 - for best results, allow `chatgpt.com` to read the clipboard in the browser; otherwise the runner may fall back to DOM extraction more often
 - the runner is intentionally designed to target the **latest assistant reply** and its **bottom action bar** so future multi-turn support does not need a selector redesign
-- OpenClaw browser handles are treated as stable in this order: `suggestedTargetId` -> `tabId` -> `targetId` -> tab label
+- Browser HTTP actions use the concrete `targetId`; the stable tab label is retained for opening and debugging
 - default tab label is `chatgpt-monitor`; override with `--tab-label` when running multiple independent sessions
 - use `--browser-base-url` only when debugging a non-default Browser HTTP port
 - if the runner returns `ERR_BROWSER_UNAUTHORIZED`, pass the current gateway shared secret with `OPENCLAW_GATEWAY_TOKEN` / `OPENCLAW_GATEWAY_PASSWORD` or one-off flags instead of changing ChatGPT page state or prompt text

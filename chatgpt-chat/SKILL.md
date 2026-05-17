@@ -56,7 +56,7 @@ Follow this exact order whenever possible:
 
 1. Open `https://chatgpt.com/` with browser profile `openclaw`
 2. Use a stable OpenClaw tab label, default `chatgpt-monitor`
-3. Prefer OpenClaw `suggestedTargetId` / `tabId` over raw CDP `targetId`
+3. Use the stable OpenClaw tab label for open/find, then use the concrete CDP `targetId` for Browser HTTP actions
 4. Verify page usability / login state
 5. Locate the prompt textbox
 6. Inject the prompt text
@@ -260,7 +260,7 @@ The runner returns structured JSON including fields such as:
 - For the best chance of getting native ChatGPT markdown, allow `chatgpt.com` to read the clipboard in the browser.
 - `Copy code` inside code blocks is intentionally excluded; the runner targets the copy button that lives with turn-level actions such as feedback/share/retry.
 - Browser-control transient issues such as `ERR_TAB_NOT_FOUND` now first use a short readiness retry window before reopening the tab once.
-- The runner is aligned with current OpenClaw browser guidance: stable tab labels and `suggestedTargetId` / `tabId` are preferred over volatile raw CDP target IDs.
+- The runner uses stable tab labels for open/find, but Browser HTTP actions use concrete `targetId` values because OpenClaw 2026.5.x validates action targets strictly.
 - The default transport is OpenClaw loopback Browser HTTP. On OpenClaw 2026.5.x, pass the current gateway shared secret via env or `--browser-token` / `--browser-password` if the runner reports `ERR_BROWSER_UNAUTHORIZED`.
 - Keep behavior deterministic; do not improvise browser exploration when the state machine already has a known path.
 

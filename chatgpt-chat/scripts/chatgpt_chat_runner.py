@@ -609,8 +609,13 @@ def _extract_answer_and_sources(client: BrowserClient, req: Request, target_id: 
 
 
 def _target_from_opened(opened: dict[str, Any], fallback_label: Optional[str]) -> str:
-    """Prefer OpenClaw's stable tab handles over volatile raw CDP target IDs."""
-    for key in ('suggestedTargetId', 'tabId', 'targetId', 'id', 'label'):
+    """Use the concrete CDP target id for Browser HTTP actions.
+
+    OpenClaw may return stable labels such as suggestedTargetId for humans and
+    tab tracking, but the HTTP /act endpoint validates against the concrete
+    targetId in recent 2026.5.x builds.
+    """
+    for key in ('targetId', 'id', 'tabId', 'suggestedTargetId', 'label'):
         value = opened.get(key)
         if value:
             return str(value)
@@ -961,7 +966,10 @@ def execute_state_machine(req: Request) -> Result:
     except Exception as e:
         msg = str(e)
         result.error = msg
-        if 'tab not found' in msg.lower():
+        if 'ACT_TARGET_ID_MISMATCH' in msg or 'action targetId must match request targetId' in msg:
+            result.errorCode = 'ERR_BROWSER_TARGET_MISMATCH'
+            result.nextStep = 'Use the concrete OpenClaw targetId for Browser HTTP actions; inspect openedTab.targetId and tabs output.'
+        elif 'tab not found' in msg.lower():
             result.errorCode = 'ERR_TAB_NOT_FOUND'
             result.nextStep = 'Retry the run; the browser tab was closed or invalidated during execution.'
         elif 'Browser HTTP 401' in msg or 'Unauthorized' in msg:
