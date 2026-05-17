@@ -16,14 +16,14 @@ Each skill is a **self-contained** folder that implements a deterministic browse
 - **Self-contained**: each skill is independent with zero cross-skill dependencies
 - **Deterministic**: state machine driven, not improvised browser exploration
 - **OpenClaw browser-first**: use managed profiles, stable tab labels, `suggestedTargetId` / `tabId` handles, snapshots, and page screenshots from OpenClaw instead of maintaining a separate CDP stack
-- **CLI-first transport**: default to `openclaw browser ...` so runners reuse the user's paired OpenClaw gateway; direct Browser HTTP is available only with `--browser-transport http`
+- **HTTP loopback transport**: default to OpenClaw's Browser HTTP control surface; credentials can come from env, flags, or `openclaw.json`
 - **Structured output**: every skill returns JSON with `ok`, `error`, `errorCode`, `nextStep`, `debug`, etc.
 - **Recovery-first**: blocked states (login walls, human verification) are detected, notified, and waited on — not silently swallowed
 - **Failure is explainable**: every failure path produces a structured error code and a human-readable next step suggestion
 
 ## Prerequisites
 
-- [OpenClaw](https://github.com/nicepkg/openclaw) CLI with `openclaw browser` available and paired
+- [OpenClaw](https://github.com/nicepkg/openclaw) browser control service running locally
 - A browser profile configured in OpenClaw (default: `openclaw`)
 - Python 3.10+ (no pip dependencies — stdlib only)
 

@@ -105,7 +105,7 @@ Use OpenClaw browser control with the OpenClaw-managed browser:
 - profile: `openclaw`
 - tab label: `gemini-monitor`
 - url: `https://gemini.google.com/`
-- transport: default `openclaw browser` CLI; use `--browser-transport http` only for explicitly configured loopback Browser HTTP shared-secret environments
+- transport: loopback Browser HTTP; if OpenClaw 2026.5.x returns `ERR_BROWSER_UNAUTHORIZED`, provide the current gateway shared secret via env or `--browser-token` / `--browser-password`
 
 Prefer OpenClaw's stable target handles in this order:
 1. `suggestedTargetId`

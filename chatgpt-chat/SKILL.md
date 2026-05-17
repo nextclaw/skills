@@ -261,7 +261,7 @@ The runner returns structured JSON including fields such as:
 - `Copy code` inside code blocks is intentionally excluded; the runner targets the copy button that lives with turn-level actions such as feedback/share/retry.
 - Browser-control transient issues such as `ERR_TAB_NOT_FOUND` now first use a short readiness retry window before reopening the tab once.
 - The runner is aligned with current OpenClaw browser guidance: stable tab labels and `suggestedTargetId` / `tabId` are preferred over volatile raw CDP target IDs.
-- The default transport is the `openclaw browser` CLI. Direct Browser HTTP is only an explicit compatibility path via `--browser-transport http`, because OpenClaw 2026.5.x loopback HTTP requires shared-secret auth and does not inherit pairing/trusted-proxy identity.
+- The default transport is OpenClaw loopback Browser HTTP. On OpenClaw 2026.5.x, pass the current gateway shared secret via env or `--browser-token` / `--browser-password` if the runner reports `ERR_BROWSER_UNAUTHORIZED`.
 - Keep behavior deterministic; do not improvise browser exploration when the state machine already has a known path.
 
 ## Implementation status

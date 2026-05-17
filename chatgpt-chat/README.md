@@ -44,7 +44,7 @@ python3 scripts/chatgpt_chat_runner.py \
   --tab-label chatgpt-monitor
 ```
 
-The runner defaults to the `openclaw browser` CLI transport so it reuses the user's paired OpenClaw gateway. Direct loopback Browser HTTP remains available with `--browser-transport http` for environments that explicitly manage the shared-secret token.
+The runner uses OpenClaw's loopback Browser HTTP control surface. For OpenClaw 2026.5.12, the shared secret can be supplied by `OPENCLAW_GATEWAY_TOKEN`, `OPENCLAW_GATEWAY_PASSWORD`, `openclaw.json`, or the one-off `--browser-token` / `--browser-password` flags.
 
 Current responsibilities of the runner:
 - standardize request input
@@ -89,7 +89,8 @@ Typical structured output includes fields such as:
 - the runner is intentionally designed to target the **latest assistant reply** and its **bottom action bar** so future multi-turn support does not need a selector redesign
 - OpenClaw browser handles are treated as stable in this order: `suggestedTargetId` -> `tabId` -> `targetId` -> tab label
 - default tab label is `chatgpt-monitor`; override with `--tab-label` when running multiple independent sessions
-- default browser transport is `cli`; use `--browser-transport http` only when the local Browser HTTP shared-secret is known to be configured for the runner
+- use `--browser-base-url` only when debugging a non-default Browser HTTP port
+- if the runner returns `ERR_BROWSER_UNAUTHORIZED`, pass the current gateway shared secret with `OPENCLAW_GATEWAY_TOKEN` / `OPENCLAW_GATEWAY_PASSWORD` or one-off flags instead of changing ChatGPT page state or prompt text
 - actual user-visible notification delivery is expected to be handled by the upper orchestration layer; the runner outputs notification contract fields
 - blocked-state handling is now structured, but deeper optimization should be driven by real samples rather than guessed edge cases
 - browser-control transient issues such as `ERR_TAB_NOT_FOUND` now use a short readiness retry window before reopening the tab once

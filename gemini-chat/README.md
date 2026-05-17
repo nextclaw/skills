@@ -43,5 +43,5 @@ Target sequence:
 - project docs now live under `docs/projects/gemini-chat/`
 - project setup is aligned with the `chatgpt-chat` template
 - implementation is available as a deterministic local runner
-- current implementation uses the `openclaw browser` CLI as the default transport, with stable tab-label / target-handle handling aligned to current OpenClaw browser guidance
-- direct loopback Browser HTTP is available only through `--browser-transport http` for environments that explicitly manage the shared-secret token
+- current implementation uses OpenClaw loopback Browser HTTP, with stable tab-label / target-handle handling aligned to current OpenClaw browser guidance
+- on OpenClaw 2026.5.x, provide the gateway shared secret through env, `openclaw.json`, or one-off `--browser-token` / `--browser-password` flags if the runner reports `ERR_BROWSER_UNAUTHORIZED`
