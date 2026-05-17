@@ -326,12 +326,14 @@ def _detect_page_state(client: BrowserClient, req: Request, target_id: str) -> d
       const hasLogin = loginSignals.some(v => text.includes(v));
       const hasVerification = verificationSignals.some(v => text.includes(v));
       const hasBlocked = blockedSignals.some(v => text.includes(v));
-      const authState = hasLogin ? 'guest-or-login-suggested' : 'authenticated-or-unknown';
       let state = 'unknown';
       if (textbox) state = 'ready';
       else if (hasVerification) state = 'human_verification';
       else if (hasLogin || href.includes('/auth') || href.includes('login')) state = 'login_required';
       else if (hasBlocked) state = 'blocked';
+      const authState = state === 'ready'
+        ? 'authenticated-or-usable'
+        : hasLogin ? 'guest-or-login-suggested' : 'authenticated-or-unknown';
       const loginMatched = loginSignals.filter(v => text.includes(v)).slice(0, 5);
       const verificationMatched = verificationSignals.filter(v => text.includes(v)).slice(0, 5);
       const blockedMatched = blockedSignals.filter(v => text.includes(v)).slice(0, 5);
@@ -936,6 +938,11 @@ def execute_state_machine(req: Request) -> Result:
         stable_count = 0
         last_answer = None
         last_nonempty_extracted: dict[str, Any] | None = None
+        final_good_answer = False
+        final_is_streaming = False
+        final_has_copy_button = False
+        final_has_feedback = False
+        final_stable_count = 0
         samples: list[dict[str, Any]] = []
 
         while time.time() < deadline:
@@ -952,6 +959,10 @@ def execute_state_machine(req: Request) -> Result:
             
             cleaned_temp = clean_answer_text(answer)
             good_answer = bool(cleaned_temp and len(cleaned_temp) > 8)
+            final_good_answer = good_answer
+            final_is_streaming = is_streaming
+            final_has_copy_button = has_copy_button
+            final_has_feedback = has_feedback
             
             if good_answer:
                 last_nonempty_extracted = extracted
@@ -972,6 +983,7 @@ def execute_state_machine(req: Request) -> Result:
             else:
                 stable_count = 0
                 last_answer = answer
+            final_stable_count = stable_count
 
             if good_answer and has_copy_button and stable_count >= 1:
                 break
@@ -1008,10 +1020,11 @@ def execute_state_machine(req: Request) -> Result:
             result.extractionMode = 'innerText'
         result.usedClipboard = bool(extracted.get('usedClipboard'))
         result.copyInterceptWorked = bool(extracted.get('copyInterceptWorked'))
+        completion_signal = final_has_copy_button or final_has_feedback or final_stable_count >= 2
         result.partial = (
-            bool(extracted.get('isStreaming'))
-            or not good_answer
-            or not (bool(extracted.get('hasCopyButton')) or bool(extracted.get('hasPositiveFeedback')) or bool(extracted.get('hasNegativeFeedback')))
+            final_is_streaming
+            or not final_good_answer
+            or not completion_signal
         )
         if result.partial:
             result.nextStep = 'Answer may still be streaming or extraction may be incomplete.'

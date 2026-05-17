@@ -329,12 +329,14 @@ def _detect_page_state(client: BrowserClient, req: Request, target_id: str) -> d
       const hasLogin = loginMatched.length > 0;
       const hasVerification = verificationMatched.length > 0;
       const hasBlocked = blockedMatched.length > 0;
-      const authState = hasLogin ? 'guest-or-login-suggested' : 'authenticated-or-unknown';
       let state = 'unknown';
       if (editor) state = 'ready';
       else if (hasVerification) state = 'human_verification';
       else if (hasLogin || href.includes('accounts.google.com') || href.includes('signin')) state = 'login_required';
       else if (hasBlocked) state = 'blocked';
+      const authState = state === 'ready'
+        ? 'authenticated-or-usable'
+        : hasLogin ? 'guest-or-login-suggested' : 'authenticated-or-unknown';
       const reason = state === 'human_verification'
         ? (verificationMatched[0] || null)
         : state === 'login_required'
