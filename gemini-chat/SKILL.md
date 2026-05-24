@@ -87,6 +87,7 @@ The runner currently returns structured JSON including fields such as:
 - `mode`
 - `wrapped_prompt`
 - `answer`
+- `sources`
 - `conversationUrl`
 - `errorCode`
 - `pageState`
@@ -171,12 +172,12 @@ If Gemini web cannot be used, say so clearly and offer fallback:
 Use short, explicit prompts for best reliability.
 
 Examples:
-- `最佳的行车记录仪有哪些？`
-- `请比较 iPhone 16 Pro 和 Pixel 10 Pro，列出优缺点。`
-- `请总结这篇文章的核心观点，并用 5 条 bullet 输出。`
+- `What are the best budget dash cams?`
+- `Compare the iPhone 16 Pro and Pixel 10 Pro, listing pros and cons.`
+- `Summarize the article's key points in 5 bullets.`
 
 For stronger extraction reliability, you may wrap the user request:
-- `请直接回答以下问题，并尽量结构化输出：<question>`
+- `Answer in English. Answer the question below and include a "Sources" section listing the main sources or references you relied on, with links where available.`
 
 ## Output mode
 
@@ -189,6 +190,7 @@ Current mode system is aligned with `chatgpt-chat`:
 
 - `fetch-with-sources`
   - wrap the question to explicitly request major sources
+  - extract visible source links from Gemini's latest answer when the Web UI exposes anchors
   - still return structured result, not a local file by default
 
 - `search`

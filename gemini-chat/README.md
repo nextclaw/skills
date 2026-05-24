@@ -8,6 +8,7 @@ Current scope:
 - single-turn ask
 - structured result output (`fetch` / `fetch-with-sources` / `search` / `report`)
 - capture Gemini Web answer text
+- capture visible source links when Gemini Web exposes anchors in the answer area
 - separate final `answer` from Gemini thinking metadata (`thoughtLabels` / `thinking`)
 - copy-first probing with DOM fallback for answer extraction
 - deterministic browser state machine
@@ -35,7 +36,7 @@ Target sequence:
 6. input the prompt with a stable strategy
 7. submit the prompt
 8. wait for Gemini answer stabilization
-9. extract the latest answer text
+9. extract the latest answer text and visible source links
 10. return structured JSON
 
 ## Current status

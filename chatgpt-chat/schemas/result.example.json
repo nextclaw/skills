@@ -1,8 +1,8 @@
 {
   "ok": true,
   "mode": "fetch-with-sources",
-  "prompt": "请整理最近一周比特币价格变化",
-  "wrapped_prompt": "请使用网页搜索能力回答以下问题，并列出主要来源：请整理最近一周比特币价格变化",
+  "prompt": "Summarize Bitcoin price changes over the last week.",
+  "wrapped_prompt": "Answer in English. Answer the question below and include a \"Sources\" section listing the main sources or references you relied on, with links where available.\n\nQuestion: Summarize Bitcoin price changes over the last week.",
   "answer": "...",
   "conversationUrl": "https://chatgpt.com/c/...",
   "title": "比特币价格趋势报告",

@@ -27,6 +27,12 @@ DEFAULT_PROFILE = 'openclaw'
 
 
 @dataclass
+class Source:
+    text: str
+    href: str
+
+
+@dataclass
 class Request:
     prompt: str
     mode: str = 'fetch-with-sources'
@@ -55,6 +61,7 @@ class Result:
     thinking: Optional[str] = None
     conversationUrl: Optional[str] = None
     title: Optional[str] = None
+    sources: list[Source] = field(default_factory=list)
     reportPath: Optional[str] = None
     error: Optional[str] = None
     errorCode: Optional[str] = None
@@ -173,15 +180,71 @@ class BrowserClient:
 
 def wrap_prompt(req: Request) -> str:
     if req.mode == 'search':
-        return f'请使用网页搜索能力回答以下问题，并列出主要来源：{req.prompt}'
+        return (
+            'Answer in English. Use web browsing/search if available. '
+            'Answer the question below and include a "Sources" section listing the main sources '
+            f'or references you relied on, with links where available.\n\nQuestion: {req.prompt}'
+        )
     if req.mode == 'report':
         return (
-            '请使用网页搜索能力回答以下问题，并尽量结构化输出为简洁报告，'
-            f'最后列出主要来源：{req.prompt}'
+            'Answer in English. Use web browsing/search if available. '
+            'Write a concise, structured report for the question below. '
+            'End with a "Sources" section listing the main sources or references you relied on, '
+            f'with links where available.\n\nQuestion: {req.prompt}'
         )
     if req.mode == 'fetch-with-sources':
-        return f'请回答以下问题，并列出主要来源：{req.prompt}'
+        return (
+            'Answer in English. Answer the question below and include a "Sources" section '
+            f'listing the main sources or references you relied on, with links where available.\n\nQuestion: {req.prompt}'
+        )
     return req.prompt
+
+
+def normalize_source_text(text: str, href: str) -> str:
+    text = re.sub(r'\s+', ' ', (text or '').strip())
+    if text and text.lower() not in {'source', 'sources', 'link', 'open link'}:
+        return text
+    parsed = urllib.parse.urlparse(href)
+    host = parsed.netloc.replace('www.', '')
+    return host or href
+
+
+def is_usable_source_href(href: str) -> bool:
+    href = (href or '').strip()
+    if not href or href.startswith('#'):
+        return False
+    parsed = urllib.parse.urlparse(href)
+    scheme = parsed.scheme.lower()
+    host = parsed.netloc.lower()
+    path = parsed.path.lower()
+    if scheme not in {'http', 'https'}:
+        return False
+    if host == 'accounts.google.com':
+        return False
+    if 'signin' in path or 'login' in path:
+        return False
+    return True
+
+
+def dedupe_sources(sources: list[Source]) -> list[Source]:
+    seen: set[str] = set()
+    out: list[Source] = []
+    for src in sources:
+        href = (src.href or '').strip()
+        if not is_usable_source_href(href) or href in seen:
+            continue
+        seen.add(href)
+        out.append(Source(text=normalize_source_text(src.text, href), href=href))
+    return out
+
+
+def sources_from_link_items(items: list[dict[str, Any]] | None) -> list[Source]:
+    sources: list[Source] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        sources.append(Source(text=str(item.get('text') or ''), href=str(item.get('href') or '')))
+    return dedupe_sources(sources)
 
 
 _slug_re = re.compile(r'[^a-zA-Z0-9\u4e00-\u9fff]+')
@@ -601,6 +664,7 @@ def _extract_answer(client: BrowserClient, req: Request, target_id: str) -> dict
       }}
 
       let sourceText = copyText;
+      let answerBlock = null;
       let extractionMode = copyText ? 'copy' : (copyClicked ? 'copy-probed-dom-fallback' : 'dom-text');
       if (!sourceText) {{
         const headings = [...document.querySelectorAll('h1,h2,h3,h4')];
@@ -627,8 +691,32 @@ def _extract_answer(client: BrowserClient, req: Request, target_id: str) -> dict
         }}
 
         if (!block) return {{ok:false, reason:'no assistant block yet', extractionMode, copyClicked, copyButtonMeta}};
+        answerBlock = block;
         sourceText = (block.innerText || block.textContent || '').trim();
       }}
+
+      const isUsableHref = (href) => {{
+        if (!href) return false;
+        try {{
+          const url = new URL(href, location.href);
+          if (!['http:', 'https:'].includes(url.protocol)) return false;
+          if (url.hash && !url.pathname.replace(/\//g, '') && !url.search) return false;
+          const host = url.hostname.toLowerCase();
+          const path = url.pathname.toLowerCase();
+          if (host === 'accounts.google.com') return false;
+          if (path.includes('signin') || path.includes('login')) return false;
+          return true;
+        }} catch (err) {{
+          return false;
+        }}
+      }};
+      const links = answerBlock ? [...answerBlock.querySelectorAll('a[href]')]
+        .map(a => ({{
+          text: (a.innerText || a.textContent || a.getAttribute('aria-label') || '').trim(),
+          href: a.href || a.getAttribute('href') || '',
+        }}))
+        .filter(link => isUsableHref(link.href))
+        : [];
 
       const cleaned = cleanText(sourceText);
       const split = splitThinking(cleaned);
@@ -646,6 +734,8 @@ def _extract_answer(client: BrowserClient, req: Request, target_id: str) -> dict
         copyInterceptWorked: clipboardWorked,
         copyClicked,
         copyButtonMeta,
+        links,
+        linkCount: links.length,
         rawPreview: sourceText.slice(0, 400),
       }};
     }}"""
@@ -833,6 +923,7 @@ def execute_state_machine(req: Request) -> Result:
             samples.append({
                 'len': len(answer),
                 'streaming': is_streaming,
+                'linkCount': len(extracted.get('links') or []) if isinstance(extracted, dict) else 0,
                 'preview': answer[:120],
             })
             samples = samples[-6:]
@@ -864,6 +955,7 @@ def execute_state_machine(req: Request) -> Result:
         result.thinking = extracted.get('thinking')
         result.conversationUrl = extracted.get('url')
         result.title = extracted.get('title') or req.title
+        result.sources = sources_from_link_items(extracted.get('links') or [])
         result.extractionMode = extracted.get('extractionMode')
         result.usedClipboard = bool(extracted.get('usedClipboard'))
         result.copyInterceptWorked = bool(extracted.get('copyInterceptWorked'))

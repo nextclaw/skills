@@ -182,14 +182,23 @@ class BrowserClient:
 
 def wrap_prompt(req: Request) -> str:
     if req.mode == 'search':
-        return f"请使用网页搜索能力回答以下问题，并列出主要来源：{req.prompt}"
+        return (
+            'Answer in English. Use web browsing/search if available. '
+            'Answer the question below and include a "Sources" section listing the main sources '
+            f'or references you relied on, with links where available.\n\nQuestion: {req.prompt}'
+        )
     if req.mode == 'report':
         return (
-            '请使用网页搜索能力回答以下问题，并尽量结构化输出为简洁报告，'
-            f'最后列出主要来源：{req.prompt}'
+            'Answer in English. Use web browsing/search if available. '
+            'Write a concise, structured report for the question below. '
+            'End with a "Sources" section listing the main sources or references you relied on, '
+            f'with links where available.\n\nQuestion: {req.prompt}'
         )
     if req.mode == 'fetch-with-sources':
-        return f"请回答以下问题，并列出主要来源：{req.prompt}"
+        return (
+            'Answer in English. Answer the question below and include a "Sources" section '
+            f'listing the main sources or references you relied on, with links where available.\n\nQuestion: {req.prompt}'
+        )
     return req.prompt
 
 

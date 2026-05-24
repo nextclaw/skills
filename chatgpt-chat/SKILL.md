@@ -16,7 +16,7 @@ Then run the runner with a **relative path**, for example:
 
 ```bash
 python3 scripts/chatgpt_chat_runner.py \
-  --prompt "请解释什么是量子计算，并列出主要来源"
+  --prompt "What is quantum computing?"
 ```
 
 Do **not** document machine-specific absolute paths as the normal usage example.
@@ -199,8 +199,8 @@ Preferred path:
 For best reliability, wrap the user's request in a minimal explicit instruction only when needed.
 
 Examples:
-- `请直接回答以下问题，并尽量结构化输出：<question>`
-- `请使用网页搜索能力回答以下问题，并列出主要来源：<question>`
+- `Answer in English. Answer the question below and include a "Sources" section listing the main sources or references you relied on, with links where available.`
+- `Answer in English. Use web browsing/search if available. Answer the question below and include a "Sources" section listing the main sources or references you relied on, with links where available.`
 
 Avoid overly long wrapper prompts unless the user asked for a formal report.
 
@@ -213,11 +213,11 @@ Common examples:
 
 ```bash
 python3 scripts/chatgpt_chat_runner.py \
-  --prompt "请解释什么是量子计算，并列出主要来源"
+  --prompt "What is quantum computing?"
 
 python3 scripts/chatgpt_chat_runner.py \
   --mode report \
-  --prompt "总结北美主流行车记录仪品牌的主要特点，并列出主要来源"
+  --prompt "Summarize the main characteristics of popular North American dash cam brands."
 
 python3 scripts/chatgpt_chat_runner.py \
   --conversation-url "https://chatgpt.com/c/..." \
