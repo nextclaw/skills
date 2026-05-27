@@ -814,6 +814,61 @@ def _wait_for_manual_recovery(client: BrowserClient, req: Request, target_id: st
     }
 
 
+def _safe_close_tab(client: BrowserClient, profile: str, target_id: Optional[str], debug: dict[str, Any], key: str = 'closedTab') -> None:
+    if not target_id:
+        return
+    try:
+        client.close_tab(target_id, profile)
+        debug[key] = True
+    except Exception as close_err:
+        debug[key] = False
+        debug[f'{key}Error'] = str(close_err)
+
+
+def _open_ready_tab(client: BrowserClient, req: Request, target_url: str, debug: dict[str, Any], result: Result, *, prefix: str = '') -> str:
+    opened = client.open_tab(target_url, req.profile, req.tab_label)
+    target_id = _target_from_opened(opened, req.tab_label)
+    result.browserTarget = target_id
+    debug[f'{prefix}openedTab' if prefix else 'openedTab'] = opened
+    debug[f'{prefix}targetId' if prefix else 'targetId'] = target_id
+    _wait_until_tab_ready(client, req.profile, target_id, debug=debug)
+    _wait(client, req.profile, target_id, 2500)
+    return target_id
+
+
+def _submit_prompt_and_get_conversation_url(client: BrowserClient, req: Request, target_id: str, debug: dict[str, Any], *, prefix: str = '') -> tuple[str | None, dict[str, Any] | None]:
+    injected = _ensure_prompt_injected(client, req, target_id)
+    debug[f'{prefix}injected' if prefix else 'injected'] = injected
+    if not injected or not injected.get('ok'):
+        return None, {'errorCode': 'ERR_NO_TEXTBOX', 'error': f'Prompt injection failed: {injected}', 'nextStep': 'Re-check textbox selectors on ChatGPT homepage.'}
+
+    send = _find_send_button(client, req, target_id)
+    debug[f'{prefix}sendButton' if prefix else 'sendButton'] = send
+    if not send or not send.get('ok'):
+        return None, {'errorCode': 'ERR_SEND_BUTTON_MISSING', 'error': 'Send button did not appear after prompt injection.', 'nextStep': 'Retry prompt injection or refresh ChatGPT page state.'}
+
+    clicked = _click_send(client, req, target_id)
+    debug[f'{prefix}clicked' if prefix else 'clicked'] = clicked
+    if not clicked or not clicked.get('ok'):
+        return None, {'errorCode': 'ERR_SUBMISSION_FAILED', 'error': f'Send click failed: {clicked}', 'nextStep': 'Verify send button enabled state and DOM label.'}
+
+    conversation_checks = []
+    deadline = time.time() + 25
+    while time.time() < deadline:
+        _wait(client, req.profile, target_id, 2500)
+        snap = client.snapshot(target_id=target_id, profile=req.profile, max_chars=20000, include_urls=True)
+        url = (snap or {}).get('url') if isinstance(snap, dict) else None
+        conversation_checks.append({'ts': int(time.time()), 'url': url})
+        if isinstance(snap, dict) and snap.get('urls'):
+            debug[f'{prefix}snapshotUrls' if prefix else 'snapshotUrls'] = snap.get('urls')
+        if url and '/c/' in url:
+            debug[f'{prefix}snapshotUrl' if prefix else 'snapshotUrl'] = url
+            debug[f'{prefix}conversationChecks' if prefix else 'conversationChecks'] = conversation_checks[-8:]
+            return url, None
+    debug[f'{prefix}conversationChecks' if prefix else 'conversationChecks'] = conversation_checks[-8:]
+    return None, {'errorCode': 'ERR_NO_CONVERSATION_URL', 'error': 'Submission did not reach a ChatGPT conversation URL.', 'nextStep': 'Check whether send succeeded but page remained on homepage.'}
+
+
 def execute_state_machine(req: Request) -> Result:
     result = Result(ok=False, mode=req.mode, prompt=req.prompt, wrapped_prompt=wrap_prompt(req))
     client = BrowserClient(base_url=req.browser_base_url, token=req.browser_token, password=req.browser_password)
@@ -826,31 +881,12 @@ def execute_state_machine(req: Request) -> Result:
     }
     result.debug = debug
 
+    target_id: Optional[str] = None
     try:
         target_url = req.conversation_url or CHATGPT_URL
-        opened = client.open_tab(target_url, req.profile, req.tab_label)
-        target_id = _target_from_opened(opened, req.tab_label)
-        result.browserTarget = target_id
-        debug['openedTab'] = opened
+        target_id = _open_ready_tab(client, req, target_url, debug, result)
         debug['initialTargetId'] = target_id
-        debug['targetId'] = target_id
         debug['reopenedTab'] = False
-        try:
-            _wait_until_tab_ready(client, req.profile, target_id, debug=debug)
-        except Exception as ready_err:
-            if 'tab not found' in str(ready_err).lower():
-                debug['initialReadyError'] = str(ready_err)
-                debug['reopenedTab'] = True
-                reopened = client.open_tab(target_url, req.profile, req.tab_label)
-                target_id = _target_from_opened(reopened, req.tab_label)
-                result.browserTarget = target_id
-                debug['reopenedTabDetails'] = reopened
-                debug['replacementTargetId'] = target_id
-                debug['targetId'] = target_id
-                _wait_until_tab_ready(client, req.profile, target_id, debug=debug)
-            else:
-                raise
-        _wait(client, req.profile, target_id, 2500)
 
         page_state = _detect_page_state(client, req, target_id)
         debug['pageStateCheck'] = page_state
@@ -904,41 +940,16 @@ def execute_state_machine(req: Request) -> Result:
             result.nextStep = 'Inspect page debug info and update state detection rules if needed.'
             return result
 
-        injected = _ensure_prompt_injected(client, req, target_id)
-        debug['injected'] = injected
-        if not injected or not injected.get('ok'):
-            result.error = f'Prompt injection failed: {injected}'
-            result.errorCode = 'ERR_NO_TEXTBOX'
-            result.nextStep = 'Re-check textbox selectors on ChatGPT homepage.'
-            return result
-
-        send = _find_send_button(client, req, target_id)
-        debug['sendButton'] = send
-        if not send or not send.get('ok'):
-            result.error = 'Send button did not appear after prompt injection.'
-            result.errorCode = 'ERR_SEND_BUTTON_MISSING'
-            result.nextStep = 'Retry prompt injection or refresh ChatGPT page state.'
-            return result
-
-        clicked = _click_send(client, req, target_id)
-        debug['clicked'] = clicked
-        if not clicked or not clicked.get('ok'):
-            result.error = f'Send click failed: {clicked}'
-            result.errorCode = 'ERR_SUBMISSION_FAILED'
-            result.nextStep = 'Verify send button enabled state and DOM label.'
-            return result
-
-        # wait for conversation and initial answer render
-        _wait(client, req.profile, target_id, 10000)
-        snap = client.snapshot(target_id=target_id, profile=req.profile, max_chars=20000, include_urls=True)
-        debug['snapshotUrl'] = snap.get('url') if isinstance(snap, dict) else None
-        if isinstance(snap, dict) and snap.get('urls'):
-            debug['snapshotUrls'] = snap.get('urls')
-        url = (snap or {}).get('url') if isinstance(snap, dict) else None
-        if not url or '/c/' not in url:
-            result.error = 'Submission did not reach a ChatGPT conversation URL.'
-            result.errorCode = 'ERR_NO_CONVERSATION_URL'
-            result.nextStep = 'Check whether send succeeded but page remained on homepage.'
+        url, submit_error = _submit_prompt_and_get_conversation_url(client, req, target_id, debug)
+        if submit_error:
+            debug['cleanTabRetry'] = {'reason': submit_error.get('errorCode')}
+            _safe_close_tab(client, req.profile, target_id, debug, key='closedBeforeRetry')
+            target_id = _open_ready_tab(client, req, target_url, debug, result, prefix='retry')
+            url, submit_error = _submit_prompt_and_get_conversation_url(client, req, target_id, debug, prefix='retry')
+        if submit_error or not url:
+            result.error = (submit_error or {}).get('error') or 'Submission did not reach a ChatGPT conversation URL.'
+            result.errorCode = (submit_error or {}).get('errorCode') or 'ERR_NO_CONVERSATION_URL'
+            result.nextStep = (submit_error or {}).get('nextStep') or 'Retry after resetting the ChatGPT tab.'
             return result
 
         deadline = time.time() + max(15, req.timeout_seconds)
@@ -1037,12 +1048,6 @@ def execute_state_machine(req: Request) -> Result:
         )
         if result.partial:
             result.nextStep = 'Answer may still be streaming or extraction may be incomplete.'
-        try:
-            client.close_tab(target_id, req.profile)
-            debug['closedTab'] = True
-        except Exception as close_err:
-            debug['closedTab'] = False
-            debug['closeTabError'] = str(close_err)
         return result
     except Exception as e:
         msg = str(e)
@@ -1060,6 +1065,9 @@ def execute_state_machine(req: Request) -> Result:
             result.errorCode = 'ERR_UNKNOWN_BLOCKED_STATE'
             result.nextStep = 'Inspect local browser control service, auth token, and ChatGPT DOM state.'
         return result
+    finally:
+        if target_id and not debug.get('closedTab'):
+            _safe_close_tab(client, req.profile, target_id, debug)
 
 
 def parse_args() -> argparse.Namespace:

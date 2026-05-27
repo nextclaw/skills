@@ -794,6 +794,50 @@ def _wait_for_manual_recovery(client: BrowserClient, req: Request, target_id: st
     }
 
 
+def _safe_close_tab(client: BrowserClient, profile: str, target_id: Optional[str], debug: dict[str, Any], key: str = 'closedTab') -> None:
+    if not target_id:
+        return
+    try:
+        client.close_tab(target_id, profile)
+        debug[key] = True
+    except Exception as close_err:
+        debug[key] = False
+        debug[f'{key}Error'] = str(close_err)
+
+
+def _open_ready_tab(client: BrowserClient, req: Request, target_url: str, debug: dict[str, Any], result: Result, *, prefix: str = '') -> str:
+    opened = client.open_tab(target_url, req.profile, req.tab_label)
+    target_id = _target_from_opened(opened, req.tab_label)
+    result.browserTarget = target_id
+    debug[f'{prefix}openedTab' if prefix else 'openedTab'] = opened
+    debug[f'{prefix}targetId' if prefix else 'targetId'] = target_id
+    _wait_until_tab_ready(client, req.profile, target_id, debug=debug)
+    _wait(client, req.profile, target_id, 2500)
+    return target_id
+
+
+def _submit_and_confirm(client: BrowserClient, req: Request, target_id: str, debug: dict[str, Any], *, prefix: str = '') -> dict[str, Any] | None:
+    injected = _ensure_prompt_injected(client, req, target_id)
+    debug[f'{prefix}injected' if prefix else 'injected'] = injected
+    if not injected or not injected.get('ok'):
+        return {'errorCode': 'ERR_NO_EDITOR', 'error': f'Prompt injection failed: {injected}', 'nextStep': 'Re-check Gemini editor selectors.'}
+
+    submitted = _submit_prompt(client, req, target_id)
+    debug[f'{prefix}submitted' if prefix else 'submitted'] = submitted
+    if not submitted or not submitted.get('ok'):
+        return {'errorCode': 'ERR_SUBMISSION_FAILED', 'error': f'Prompt submission failed: {submitted}', 'nextStep': 'Verify editor state and Gemini submit path.'}
+
+    submission_confirm = _confirm_submission(client, req, target_id)
+    debug[f'{prefix}submissionConfirm' if prefix else 'submissionConfirm'] = submission_confirm
+    if not submission_confirm.get('ok') or not submission_confirm.get('confirmed'):
+        return {
+            'errorCode': 'ERR_SUBMISSION_FAILED',
+            'error': f'Prompt submission did not produce Gemini response signals: {submission_confirm}',
+            'nextStep': 'Prefer real Gemini send-button submission; editor input alone was not enough.',
+        }
+    return None
+
+
 def execute_state_machine(req: Request) -> Result:
     result = Result(ok=False, mode=req.mode, prompt=req.prompt, wrapped_prompt=wrap_prompt(req))
     client = BrowserClient(base_url=req.browser_base_url, token=req.browser_token, password=req.browser_password)
@@ -806,31 +850,12 @@ def execute_state_machine(req: Request) -> Result:
     }
     result.debug = debug
 
+    target_id: Optional[str] = None
     try:
         target_url = req.conversation_url or GEMINI_URL
-        opened = client.open_tab(target_url, req.profile, req.tab_label)
-        target_id = _target_from_opened(opened, req.tab_label)
-        result.browserTarget = target_id
-        debug['openedTab'] = opened
+        target_id = _open_ready_tab(client, req, target_url, debug, result)
         debug['initialTargetId'] = target_id
-        debug['targetId'] = target_id
         debug['reopenedTab'] = False
-        try:
-            _wait_until_tab_ready(client, req.profile, target_id, debug=debug)
-        except Exception as ready_err:
-            if 'tab not found' in str(ready_err).lower():
-                debug['initialReadyError'] = str(ready_err)
-                debug['reopenedTab'] = True
-                reopened = client.open_tab(target_url, req.profile, req.tab_label)
-                target_id = _target_from_opened(reopened, req.tab_label)
-                result.browserTarget = target_id
-                debug['reopenedTabDetails'] = reopened
-                debug['replacementTargetId'] = target_id
-                debug['targetId'] = target_id
-                _wait_until_tab_ready(client, req.profile, target_id, debug=debug)
-            else:
-                raise
-        _wait(client, req.profile, target_id, 2500)
 
         page_state = _detect_page_state(client, req, target_id)
         debug['pageStateCheck'] = page_state
@@ -876,28 +901,16 @@ def execute_state_machine(req: Request) -> Result:
             result.nextStep = 'Inspect Gemini page debug info and update detection rules if needed.'
             return result
 
-        injected = _ensure_prompt_injected(client, req, target_id)
-        debug['injected'] = injected
-        if not injected or not injected.get('ok'):
-            result.error = f'Prompt injection failed: {injected}'
-            result.errorCode = 'ERR_NO_EDITOR'
-            result.nextStep = 'Re-check Gemini editor selectors.'
-            return result
-
-        submitted = _submit_prompt(client, req, target_id)
-        debug['submitted'] = submitted
-        if not submitted or not submitted.get('ok'):
-            result.error = f'Prompt submission failed: {submitted}'
-            result.errorCode = 'ERR_SUBMISSION_FAILED'
-            result.nextStep = 'Verify editor state and Gemini submit path.'
-            return result
-
-        submission_confirm = _confirm_submission(client, req, target_id)
-        debug['submissionConfirm'] = submission_confirm
-        if not submission_confirm.get('ok') or not submission_confirm.get('confirmed'):
-            result.error = f'Prompt submission did not produce Gemini response signals: {submission_confirm}'
-            result.errorCode = 'ERR_SUBMISSION_FAILED'
-            result.nextStep = 'Prefer real Gemini send-button submission; editor input alone was not enough.'
+        submit_error = _submit_and_confirm(client, req, target_id, debug)
+        if submit_error:
+            debug['cleanTabRetry'] = {'reason': submit_error.get('errorCode')}
+            _safe_close_tab(client, req.profile, target_id, debug, key='closedBeforeRetry')
+            target_id = _open_ready_tab(client, req, target_url, debug, result, prefix='retry')
+            submit_error = _submit_and_confirm(client, req, target_id, debug, prefix='retry')
+        if submit_error:
+            result.error = submit_error.get('error')
+            result.errorCode = submit_error.get('errorCode')
+            result.nextStep = submit_error.get('nextStep')
             return result
 
         deadline = time.time() + max(15, req.timeout_seconds)
@@ -963,12 +976,6 @@ def execute_state_machine(req: Request) -> Result:
         if result.partial:
             result.nextStep = 'Gemini answer may still be streaming or incomplete.'
 
-        try:
-            client.close_tab(target_id, req.profile)
-            debug['closedTab'] = True
-        except Exception as close_err:
-            debug['closedTab'] = False
-            debug['closeTabError'] = str(close_err)
         return result
     except Exception as e:
         msg = str(e)
@@ -986,6 +993,9 @@ def execute_state_machine(req: Request) -> Result:
             result.errorCode = 'ERR_UNKNOWN_BLOCKED_STATE'
             result.nextStep = 'Inspect local browser control service and Gemini DOM state.'
         return result
+    finally:
+        if target_id and not debug.get('closedTab'):
+            _safe_close_tab(client, req.profile, target_id, debug)
 
 
 def parse_args() -> argparse.Namespace:
