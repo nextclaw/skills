@@ -44,6 +44,9 @@ class Request:
     title: Optional[str] = None
     conversation_url: Optional[str] = None
     timeout_seconds: int = 45
+    page_ready_timeout_seconds: int = 180
+    submit_timeout_seconds: int = 60
+    submit_retry_after_seconds: float = 10.0
     recovery_timeout_seconds: int = 180
     recovery_poll_ms: int = 3000
     profile: str = DEFAULT_PROFILE
@@ -137,6 +140,8 @@ class BrowserClient:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode('utf-8')
                 return json.loads(raw) if raw else None
+        except TimeoutError as e:
+            raise RuntimeError(f'Browser request timed out after {timeout}s: {method} {path}') from e
         except urllib.error.HTTPError as e:
             payload = e.read().decode('utf-8', errors='replace')
             raise RuntimeError(f'Browser HTTP {e.code}: {payload}') from e
@@ -148,11 +153,11 @@ class BrowserClient:
         if label:
             body['label'] = label
         try:
-            return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', body, timeout=15)
+            return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', body, timeout=60)
         except RuntimeError as e:
             err = str(e)
             if label and ('label' in err.lower() or 'Browser HTTP 400' in err):
-                return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', {'url': url}, timeout=15)
+                return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', {'url': url}, timeout=60)
             raise
 
     def tabs(self, profile: str) -> list[dict[str, Any]]:
@@ -370,6 +375,85 @@ def _detect_page_state(client: BrowserClient, req: Request, target_id: str) -> d
     return _evaluate(client, req.profile, target_id, fn)
 
 
+def _page_state_debug_sample(state: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {'ok': False, 'error': 'state was not an object'}
+    return {
+        'ts': int(time.time()),
+        'ok': state.get('ok'),
+        'state': state.get('state'),
+        'authState': state.get('authState'),
+        'href': state.get('href'),
+        'title': state.get('title'),
+        'reason': state.get('reason'),
+        'hasTextbox': state.get('hasTextbox'),
+        'loginMatched': (state.get('loginMatched') or [])[:5],
+        'verificationMatched': (state.get('verificationMatched') or [])[:5],
+        'blockedMatched': (state.get('blockedMatched') or [])[:5],
+        'textPreview': (state.get('textPreview') or '')[:240],
+    }
+
+
+def _wait_for_page_ready_state(
+    client: BrowserClient,
+    req: Request,
+    target_id: str,
+    debug: dict[str, Any],
+    *,
+    prefix: str = '',
+) -> dict[str, Any]:
+    started = time.time()
+    timeout_seconds = max(1, req.page_ready_timeout_seconds)
+    deadline = started + timeout_seconds
+    checks: list[dict[str, Any]] = []
+    last_state: dict[str, Any] | None = None
+    last_error: str | None = None
+
+    while time.time() < deadline:
+        try:
+            state = _detect_page_state(client, req, target_id)
+            last_state = state
+            sample = _page_state_debug_sample(state)
+            checks.append(sample)
+            checks = checks[-20:]
+            page_state = state.get('state') if isinstance(state, dict) else None
+            if page_state in {'ready', 'login_required', 'human_verification', 'blocked'}:
+                break
+        except Exception as exc:
+            last_error = str(exc)
+            checks.append({'ts': int(time.time()), 'ok': False, 'error': last_error})
+            checks = checks[-20:]
+        _wait(client, req.profile, target_id, 2000)
+
+    elapsed = round(time.time() - started, 3)
+    wait_debug = {
+        'timeoutSeconds': timeout_seconds,
+        'elapsedSeconds': elapsed,
+        'checks': checks,
+        'lastError': last_error,
+        'finalState': _page_state_debug_sample(last_state),
+    }
+    key = f'{prefix}pageStateWait' if prefix else 'pageStateWait'
+    debug[key] = wait_debug
+    debug[f'{prefix}pageStateChecks' if prefix else 'pageStateChecks'] = checks
+
+    if isinstance(last_state, dict):
+        return last_state
+    return {
+        'ok': False,
+        'state': 'unknown',
+        'authState': 'authenticated-or-unknown',
+        'href': None,
+        'title': None,
+        'reason': last_error,
+        'hasTextbox': False,
+        'loginMatched': [],
+        'verificationMatched': [],
+        'blockedMatched': [],
+        'textPreview': '',
+    }
+
+
 def _ensure_prompt_injected(client: BrowserClient, req: Request, target_id: str) -> dict[str, Any]:
     prompt_json = json.dumps(wrap_prompt(req), ensure_ascii=False)
     fn = f"""() => {{
@@ -426,6 +510,56 @@ def _click_send(client: BrowserClient, req: Request, target_id: str) -> dict[str
       if (!btn) return {ok:false, reason:'send button missing'};
       btn.click();
       return {ok:true};
+    }"""
+    return _evaluate(client, req.profile, target_id, fn)
+
+
+def _submission_state(client: BrowserClient, req: Request, target_id: str) -> dict[str, Any]:
+    fn = """() => {
+      const editor = document.querySelector('#prompt-textarea, [data-testid="prompt-textarea"], [role="textbox"], [contenteditable="true"]');
+      const editorText = editor ? ((editor.innerText || editor.textContent || editor.value || '').trim()) : '';
+      const send = document.querySelector('[data-testid="send-button"]') || [...document.querySelectorAll('button')].find(b => {
+        const text = (b.getAttribute('aria-label') || b.innerText || '').toLowerCase();
+        return text.includes('发送') || text.includes('send');
+      });
+      const stop = document.querySelector('[data-testid="stop-button"]') || [...document.querySelectorAll('button')].find(b => {
+        const text = (b.getAttribute('aria-label') || b.innerText || '').toLowerCase();
+        return text.includes('stop') || text.includes('停止');
+      });
+      const assistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+      return {
+        ok: true,
+        href: location.href,
+        title: document.title || '',
+        hasEditor: !!editor,
+        editorTextLength: editorText.length,
+        editorTextPreview: editorText.slice(0, 160),
+        hasSendButton: !!send,
+        sendDisabled: !!(send && (send.disabled || send.getAttribute('aria-disabled') === 'true')),
+        hasStopButton: !!stop,
+        assistantCount
+      };
+    }"""
+    return _evaluate(client, req.profile, target_id, fn)
+
+
+def _fallback_submit(client: BrowserClient, req: Request, target_id: str) -> dict[str, Any]:
+    fn = """() => {
+      const send = document.querySelector('[data-testid="send-button"]') || [...document.querySelectorAll('button')].find(b => {
+        const text = (b.getAttribute('aria-label') || b.innerText || '').toLowerCase();
+        return text.includes('发送') || text.includes('send');
+      });
+      if (send && !(send.disabled || send.getAttribute('aria-disabled') === 'true')) {
+        send.click();
+        return {ok:true, method:'reclick-send'};
+      }
+      const editor = document.querySelector('#prompt-textarea, [data-testid="prompt-textarea"], [role="textbox"], [contenteditable="true"]');
+      if (!editor) return {ok:false, method:'none', reason:'editor missing'};
+      editor.focus();
+      editor.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', code:'Enter', which:13, keyCode:13, bubbles:true}));
+      editor.dispatchEvent(new KeyboardEvent('keypress', {key:'Enter', code:'Enter', which:13, keyCode:13, bubbles:true}));
+      editor.dispatchEvent(new KeyboardEvent('keyup', {key:'Enter', code:'Enter', which:13, keyCode:13, bubbles:true}));
+      return {ok:true, method:'enter-fallback'};
     }"""
     return _evaluate(client, req.profile, target_id, fn)
 
@@ -825,8 +959,57 @@ def _safe_close_tab(client: BrowserClient, profile: str, target_id: Optional[str
         debug[f'{key}Error'] = str(close_err)
 
 
+def _is_transient_browser_open_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            'failed to start chrome cdp',
+            'cooling down',
+            'http_unreachable',
+            'browser launch',
+            'fetch failed',
+            'timed out',
+        )
+    )
+
+
+def _browser_open_retry_delay_seconds(message: str, attempt: int) -> float:
+    match = re.search(r'retry in\s+(\d+)s', message, flags=re.I)
+    if match:
+        return float(match.group(1))
+    return 10.0 if attempt == 1 else 30.0
+
+
 def _open_ready_tab(client: BrowserClient, req: Request, target_url: str, debug: dict[str, Any], result: Result, *, prefix: str = '') -> str:
-    opened = client.open_tab(target_url, req.profile, req.tab_label)
+    attempts: list[dict[str, Any]] = []
+    opened: dict[str, Any] | None = None
+    for attempt in range(1, 4):
+        try:
+            opened = client.open_tab(target_url, req.profile, req.tab_label)
+            attempts.append({'attempt': attempt, 'ok': True})
+            break
+        except Exception as exc:
+            message = str(exc)
+            retryable = _is_transient_browser_open_error(message)
+            attempt_info: dict[str, Any] = {
+                'attempt': attempt,
+                'ok': False,
+                'error': message,
+                'retryable': retryable,
+            }
+            if retryable and attempt < 3:
+                delay = _browser_open_retry_delay_seconds(message, attempt)
+                attempt_info['retryDelaySeconds'] = delay
+                attempts.append(attempt_info)
+                time.sleep(delay)
+                continue
+            attempts.append(attempt_info)
+            debug[f'{prefix}openTabAttempts' if prefix else 'openTabAttempts'] = attempts
+            raise
+    debug[f'{prefix}openTabAttempts' if prefix else 'openTabAttempts'] = attempts
+    if opened is None:
+        raise RuntimeError('Browser tab did not open')
     target_id = _target_from_opened(opened, req.tab_label)
     result.browserTarget = target_id
     debug[f'{prefix}openedTab' if prefix else 'openedTab'] = opened
@@ -852,20 +1035,52 @@ def _submit_prompt_and_get_conversation_url(client: BrowserClient, req: Request,
     if not clicked or not clicked.get('ok'):
         return None, {'errorCode': 'ERR_SUBMISSION_FAILED', 'error': f'Send click failed: {clicked}', 'nextStep': 'Verify send button enabled state and DOM label.'}
 
+    submit_started = time.time()
     conversation_checks = []
-    deadline = time.time() + 25
+    submit_polls = []
+    fallback_done = False
+    deadline = submit_started + max(10, req.submit_timeout_seconds)
     while time.time() < deadline:
         _wait(client, req.profile, target_id, 2500)
+        submit_state = _submission_state(client, req, target_id)
+        if not isinstance(submit_state, dict):
+            submit_state = {'ok': False, 'error': 'submission state was not an object'}
         snap = client.snapshot(target_id=target_id, profile=req.profile, max_chars=20000, include_urls=True)
         url = (snap or {}).get('url') if isinstance(snap, dict) else None
-        conversation_checks.append({'ts': int(time.time()), 'url': url})
+        now = time.time()
+        elapsed = round(now - submit_started, 3)
+        conversation_checks.append({'ts': int(now), 'url': url})
+        submit_polls.append({
+            'ts': int(now),
+            'elapsedSeconds': elapsed,
+            'url': url,
+            'state': submit_state,
+        })
+        submit_polls = submit_polls[-20:]
         if isinstance(snap, dict) and snap.get('urls'):
             debug[f'{prefix}snapshotUrls' if prefix else 'snapshotUrls'] = snap.get('urls')
         if url and '/c/' in url:
             debug[f'{prefix}snapshotUrl' if prefix else 'snapshotUrl'] = url
             debug[f'{prefix}conversationChecks' if prefix else 'conversationChecks'] = conversation_checks[-8:]
+            debug[f'{prefix}submitPolls' if prefix else 'submitPolls'] = submit_polls
             return url, None
+        if (
+            not fallback_done
+            and elapsed >= req.submit_retry_after_seconds
+            and url
+            and '/c/' not in url
+            and submit_state.get('hasEditor')
+            and int(submit_state.get('editorTextLength') or 0) > 0
+        ):
+            fallback = _fallback_submit(client, req, target_id)
+            debug[f'{prefix}submitFallback' if prefix else 'submitFallback'] = {
+                'elapsedSeconds': elapsed,
+                'state': submit_state,
+                'result': fallback,
+            }
+            fallback_done = True
     debug[f'{prefix}conversationChecks' if prefix else 'conversationChecks'] = conversation_checks[-8:]
+    debug[f'{prefix}submitPolls' if prefix else 'submitPolls'] = submit_polls
     return None, {'errorCode': 'ERR_NO_CONVERSATION_URL', 'error': 'Submission did not reach a ChatGPT conversation URL.', 'nextStep': 'Check whether send succeeded but page remained on homepage.'}
 
 
@@ -888,7 +1103,7 @@ def execute_state_machine(req: Request) -> Result:
         debug['initialTargetId'] = target_id
         debug['reopenedTab'] = False
 
-        page_state = _detect_page_state(client, req, target_id)
+        page_state = _wait_for_page_ready_state(client, req, target_id, debug)
         debug['pageStateCheck'] = page_state
         result.pageState = (page_state or {}).get('state')
         result.authState = (page_state or {}).get('authState')
@@ -945,7 +1160,16 @@ def execute_state_machine(req: Request) -> Result:
             debug['cleanTabRetry'] = {'reason': submit_error.get('errorCode')}
             _safe_close_tab(client, req.profile, target_id, debug, key='closedBeforeRetry')
             target_id = _open_ready_tab(client, req, target_url, debug, result, prefix='retry')
-            url, submit_error = _submit_prompt_and_get_conversation_url(client, req, target_id, debug, prefix='retry')
+            retry_page_state = _wait_for_page_ready_state(client, req, target_id, debug, prefix='retry')
+            debug['retryPageStateCheck'] = retry_page_state
+            if retry_page_state.get('state') == 'ready':
+                url, submit_error = _submit_prompt_and_get_conversation_url(client, req, target_id, debug, prefix='retry')
+            else:
+                submit_error = {
+                    'errorCode': 'ERR_UNKNOWN_BLOCKED_STATE',
+                    'error': f"ChatGPT retry tab is not in a ready state: {retry_page_state.get('state')}",
+                    'nextStep': 'Retry after the ChatGPT homepage finishes loading.',
+                }
         if submit_error or not url:
             result.error = (submit_error or {}).get('error') or 'Submission did not reach a ChatGPT conversation URL.'
             result.errorCode = (submit_error or {}).get('errorCode') or 'ERR_NO_CONVERSATION_URL'
@@ -1061,6 +1285,9 @@ def execute_state_machine(req: Request) -> Result:
         elif 'Browser HTTP 401' in msg or 'Unauthorized' in msg:
             result.errorCode = 'ERR_BROWSER_UNAUTHORIZED'
             result.nextStep = 'Provide the current OpenClaw gateway shared secret via OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD or --browser-token/--browser-password, then retry.'
+        elif _is_transient_browser_open_error(msg) or 'Browser HTTP 409' in msg:
+            result.errorCode = 'ERR_BROWSER_CDP_UNAVAILABLE'
+            result.nextStep = 'OpenClaw managed Chrome/CDP was not available; wait for the browser cooldown to clear or restart OpenClaw/Chrome, then retry.'
         elif not result.errorCode:
             result.errorCode = 'ERR_UNKNOWN_BLOCKED_STATE'
             result.nextStep = 'Inspect local browser control service, auth token, and ChatGPT DOM state.'
@@ -1084,6 +1311,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--browser-token')
     p.add_argument('--browser-password')
     p.add_argument('--timeout-seconds', type=int, default=45)
+    p.add_argument('--page-ready-timeout-seconds', type=int, default=180)
+    p.add_argument('--submit-timeout-seconds', type=int, default=60)
+    p.add_argument('--submit-retry-after-seconds', type=float, default=10.0)
     p.add_argument('--recovery-timeout-seconds', type=int, default=180)
     p.add_argument('--recovery-poll-ms', type=int, default=3000)
     p.add_argument('--stdin-json', action='store_true', help='Read full request JSON from stdin instead of flags')
@@ -1103,6 +1333,9 @@ def build_request(args: argparse.Namespace) -> Request:
         title=args.title,
         conversation_url=args.conversation_url,
         timeout_seconds=args.timeout_seconds,
+        page_ready_timeout_seconds=args.page_ready_timeout_seconds,
+        submit_timeout_seconds=args.submit_timeout_seconds,
+        submit_retry_after_seconds=args.submit_retry_after_seconds,
         recovery_timeout_seconds=args.recovery_timeout_seconds,
         recovery_poll_ms=args.recovery_poll_ms,
         profile=args.profile,
