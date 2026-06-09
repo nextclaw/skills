@@ -44,14 +44,14 @@ python3 scripts/chatgpt_chat_runner.py \
   --tab-label chatgpt-monitor
 ```
 
-The runner uses OpenClaw's loopback Browser HTTP control surface. For OpenClaw 2026.5.12, the shared secret can be supplied by `OPENCLAW_GATEWAY_TOKEN`, `OPENCLAW_GATEWAY_PASSWORD`, `openclaw.json`, or the one-off `--browser-token` / `--browser-password` flags.
+The runner uses OpenClaw 2026.6.x CDP transport for the `openclaw` browser profile. The default CDP URL is `http://127.0.0.1:18800`; override it with `OPENCLAW_CDP_URL` or `--cdp-url` when `openclaw browser --browser-profile openclaw status` reports a different `cdpUrl`.
 
 Current responsibilities of the runner:
 - standardize request input
 - wrap prompts by mode
 - drive the ChatGPT page state machine
 - classify page state / auth state
-- use OpenClaw stable tab labels for open/find, then concrete CDP `targetId` for Browser HTTP actions
+- use concrete CDP `targetId` values for page actions
 - wait for recovery on blocked states
 - extract answer and visible sources
 - normalize / dedupe sources
@@ -87,10 +87,10 @@ Typical structured output includes fields such as:
   4. DOM-markdown fallback
 - for best results, allow `chatgpt.com` to read the clipboard in the browser; otherwise the runner may fall back to DOM extraction more often
 - the runner targets the **latest assistant reply** using multiple ChatGPT Web message structures (`article`, assistant role nodes, message test ids, and markdown containers) before falling back to diagnostics
-- Browser HTTP actions use the concrete `targetId`; the stable tab label is retained for opening and debugging
+- CDP actions use the concrete `targetId`; the stable tab label is retained for debugging
 - default tab label is `chatgpt-monitor`; override with `--tab-label` when running multiple independent sessions
-- use `--browser-base-url` only when debugging a non-default Browser HTTP port
-- if the runner returns `ERR_BROWSER_UNAUTHORIZED`, pass the current gateway shared secret with `OPENCLAW_GATEWAY_TOKEN` / `OPENCLAW_GATEWAY_PASSWORD` or one-off flags instead of changing ChatGPT page state or prompt text
+- use `--cdp-url` only when debugging a non-default OpenClaw CDP port
+- if the runner returns `ERR_BROWSER_CDP_UNAVAILABLE`, check `openclaw browser --browser-profile openclaw status` and `curl http://127.0.0.1:18800/json/version`
 - actual user-visible notification delivery is expected to be handled by the upper orchestration layer; the runner outputs notification contract fields
 - blocked-state handling is now structured, but deeper optimization should be driven by real samples rather than guessed edge cases
 - browser-control transient issues such as `ERR_TAB_NOT_FOUND` now use a short readiness retry window before reopening the tab once

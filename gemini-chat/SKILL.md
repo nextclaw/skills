@@ -106,9 +106,9 @@ Use OpenClaw browser control with the OpenClaw-managed browser:
 - profile: `openclaw`
 - tab label: `gemini-monitor`
 - url: `https://gemini.google.com/`
-- transport: loopback Browser HTTP; if OpenClaw 2026.5.x returns `ERR_BROWSER_UNAUTHORIZED`, provide the current gateway shared secret via env or `--browser-token` / `--browser-password`
+- transport: OpenClaw 2026.6.x CDP, default `http://127.0.0.1:18800`
 
-Use the stable tab label for opening/finding the tab, then use the concrete CDP `targetId` for Browser HTTP actions. OpenClaw 2026.5.x rejects `/act` calls when the action target does not match the request target.
+Use the concrete CDP `targetId` for page actions. Override with `--cdp-url` only when `openclaw browser --browser-profile openclaw status` reports a different `cdpUrl`.
 
 ### 2) Detect page state
 

@@ -34,7 +34,7 @@ class FakeOpenClient:
     def open_tab(self, *_: object) -> dict[str, object]:
         self.open_calls += 1
         if self.open_calls == 1:
-            raise RuntimeError('Browser HTTP 409: {"error":"Browser launch is cooling down. Retry in 30s"}')
+            raise RuntimeError('CDP Target.createTarget failed: {"error":"Browser launch is cooling down. Retry in 30s"}')
         return {
             "targetId": "target-1",
             "tabId": "tab-1",

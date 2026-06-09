@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """gemini-chat runner.
 
-Deterministic Gemini Web automation via the local OpenClaw browser control service.
-OpenClaw browser control is the primary automation surface; this runner is the
-fixed workflow implementation for Gemini single-turn tasks.
+Deterministic Gemini Web automation through OpenClaw 2026.6 CDP transport.
 """
 
 from __future__ import annotations
@@ -18,12 +16,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, asdict, field
-from pathlib import Path
 from typing import Any, Optional
+from websockets.sync.client import connect as websocket_connect
 
-OPENCLAW_CONFIG = Path(os.environ.get('OPENCLAW_CONFIG', '~/.openclaw/openclaw.json')).expanduser()
 GEMINI_URL = 'https://gemini.google.com/'
 DEFAULT_PROFILE = 'openclaw'
+DEFAULT_CDP_URL = 'http://127.0.0.1:18800'
 
 
 @dataclass
@@ -46,6 +44,7 @@ class Request:
     profile: str = DEFAULT_PROFILE
     tab_label: str = 'gemini-monitor'
     browser_base_url: Optional[str] = None
+    cdp_url: Optional[str] = None
     browser_token: Optional[str] = None
     browser_password: Optional[str] = None
 
@@ -85,97 +84,154 @@ class Result:
 class BrowserClient:
     def __init__(
         self,
-        config_path: Path = OPENCLAW_CONFIG,
         base_url: Optional[str] = None,
+        cdp_url: Optional[str] = None,
         token: Optional[str] = None,
         password: Optional[str] = None,
     ):
-        cfg = json.loads(config_path.read_text(encoding='utf-8'))
-        gateway_port = int(((cfg.get('gateway') or {}).get('port')) or 18789)
-        self.base_url = (base_url or os.environ.get('OPENCLAW_BROWSER_BASE_URL') or f'http://127.0.0.1:{gateway_port + 2}').rstrip('/')
-        auth = ((cfg.get('gateway') or {}).get('auth') or {})
-        self.token = ''
-        self.password = ''
+        self.cdp_url = (cdp_url or base_url or os.environ.get('OPENCLAW_CDP_URL') or DEFAULT_CDP_URL).rstrip('/')
+        self.base_url = self.cdp_url
+        self.browser_ws_url: Optional[str] = None
+        self.transport = 'cdp'
         self.auth_source = 'none'
-        for source, value, kind in (
-            ('flag-token', token, 'token'),
-            ('flag-password', password, 'password'),
-            ('env-token', os.environ.get('OPENCLAW_GATEWAY_TOKEN'), 'token'),
-            ('env-password', os.environ.get('OPENCLAW_GATEWAY_PASSWORD'), 'password'),
-            ('config-token', auth.get('token'), 'token'),
-            ('config-password', auth.get('password'), 'password'),
-        ):
-            secret = (value or '').strip()
-            if not secret:
-                continue
-            if kind == 'token':
-                self.token = secret
-            else:
-                self.password = secret
-            self.auth_source = source
-            break
+        self._next_id = 0
 
-    def _headers(self, json_body: bool = False) -> dict[str, str]:
-        headers: dict[str, str] = {}
-        if self.token:
-            headers['Authorization'] = f'Bearer {self.token}'
-        elif self.password:
-            headers['x-openclaw-password'] = self.password
-        if json_body:
-            headers['Content-Type'] = 'application/json'
-        return headers
-
-    def request(self, method: str, path: str, body: Optional[dict[str, Any]] = None, timeout: int = 20) -> Any:
-        url = f'{self.base_url}{path}'
-        data = None
-        headers = self._headers(json_body=body is not None)
-        if body is not None:
-            data = json.dumps(body).encode('utf-8')
-        req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    def request_json(self, path: str, timeout: int = 20) -> Any:
+        url = f'{self.cdp_url}{path}'
+        req = urllib.request.Request(url, method='GET')
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read().decode('utf-8')
                 return json.loads(raw) if raw else None
+        except TimeoutError as e:
+            raise RuntimeError(f'CDP request timed out after {timeout}s: GET {path}') from e
         except urllib.error.HTTPError as e:
             payload = e.read().decode('utf-8', errors='replace')
-            raise RuntimeError(f'Browser HTTP {e.code}: {payload}') from e
+            raise RuntimeError(f'CDP HTTP {e.code}: {payload}') from e
         except urllib.error.URLError as e:
-            raise RuntimeError(f'Browser request failed: {e}') from e
+            raise RuntimeError(f'CDP request failed: {e}') from e
+
+    def health(self) -> dict[str, Any]:
+        version = self.request_json('/json/version', timeout=5)
+        if not isinstance(version, dict) or not version.get('webSocketDebuggerUrl'):
+            raise RuntimeError(f'CDP endpoint did not return a browser websocket URL: {version}')
+        self.browser_ws_url = str(version['webSocketDebuggerUrl'])
+        return version
+
+    def _send_cdp(self, ws_url: str, method: str, params: Optional[dict[str, Any]] = None, timeout: int = 20) -> Any:
+        self._next_id += 1
+        message_id = self._next_id
+        payload = {'id': message_id, 'method': method, 'params': params or {}}
+        try:
+            with websocket_connect(ws_url, open_timeout=timeout, close_timeout=2) as ws:
+                ws.send(json.dumps(payload))
+                deadline = time.time() + timeout
+                while time.time() < deadline:
+                    raw = ws.recv(timeout=max(0.1, deadline - time.time()))
+                    data = json.loads(raw)
+                    if data.get('id') != message_id:
+                        continue
+                    if data.get('error'):
+                        raise RuntimeError(f'CDP {method} failed: {data["error"]}')
+                    return data.get('result')
+        except TimeoutError as e:
+            raise RuntimeError(f'CDP {method} timed out after {timeout}s') from e
+        raise RuntimeError(f'CDP {method} did not return a response')
+
+    def _browser_ws(self) -> str:
+        if not self.browser_ws_url:
+            self.health()
+        assert self.browser_ws_url is not None
+        return self.browser_ws_url
+
+    def _page_ws(self, target_id: str) -> str:
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            for tab in self.tabs(DEFAULT_PROFILE):
+                if tab.get('targetId') == target_id and tab.get('wsUrl'):
+                    return str(tab['wsUrl'])
+            time.sleep(0.2)
+        raise RuntimeError(f'CDP target not found or missing websocket URL: {target_id}')
 
     def open_tab(self, url: str, profile: str, label: Optional[str] = None) -> dict[str, Any]:
-        body: dict[str, Any] = {'url': url}
-        if label:
-            body['label'] = label
-        try:
-            return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', body, timeout=15)
-        except RuntimeError as e:
-            err = str(e)
-            if label and ('label' in err.lower() or 'Browser HTTP 400' in err):
-                return self.request('POST', f'/tabs/open?profile={urllib.parse.quote(profile)}', {'url': url}, timeout=15)
-            raise
+        target = self._send_cdp(self._browser_ws(), 'Target.createTarget', {'url': url}, timeout=30)
+        target_id = str((target or {}).get('targetId') or '')
+        if not target_id:
+            raise RuntimeError(f'CDP Target.createTarget returned no targetId: {target}')
+        return {
+            'targetId': target_id,
+            'id': target_id,
+            'tabId': target_id,
+            'suggestedTargetId': label or target_id,
+            'label': label,
+            'url': url,
+            'type': 'page',
+            'wsUrl': self._page_ws(target_id),
+        }
 
     def tabs(self, profile: str) -> list[dict[str, Any]]:
-        tabs = self.request('GET', f'/tabs?profile={urllib.parse.quote(profile)}', timeout=10)
-        return [tab for tab in (tabs or {}).get('tabs', []) if isinstance(tab, dict)]
+        tabs = self.request_json('/json/list', timeout=10)
+        out: list[dict[str, Any]] = []
+        for tab in tabs or []:
+            if not isinstance(tab, dict) or tab.get('type') != 'page':
+                continue
+            target_id = str(tab.get('id') or '')
+            out.append({
+                'targetId': target_id,
+                'id': target_id,
+                'tabId': target_id,
+                'suggestedTargetId': target_id,
+                'label': None,
+                'title': tab.get('title') or '',
+                'url': tab.get('url') or '',
+                'type': tab.get('type') or 'page',
+                'wsUrl': tab.get('webSocketDebuggerUrl'),
+            })
+        return out
 
     def snapshot(self, *, target_id: str, profile: str, max_chars: int = 12000, refs: str = 'aria', fmt: str = 'aria', include_urls: bool = True) -> dict[str, Any]:
-        params = {
-            'targetId': target_id,
-            'maxChars': str(max_chars),
-            'refs': refs,
-            'format': fmt,
-            'profile': profile,
-        }
-        if include_urls:
-            params['urls'] = 'true'
-        q = urllib.parse.urlencode(params)
-        return self.request('GET', f'/snapshot?{q}', timeout=20)
+        fn = """() => ({
+          url: location.href,
+          title: document.title || '',
+          text: (document.body && document.body.innerText || '').slice(0, 12000),
+          urls: Array.from(document.querySelectorAll('a[href]')).map(a => a.href).filter(Boolean).slice(0, 200)
+        })"""
+        result = self.act(profile=profile, payload={'kind': 'evaluate', 'targetId': target_id, 'fn': fn})
+        value = result.get('result') if isinstance(result, dict) else result
+        if isinstance(value, dict):
+            return value
+        return {'url': None, 'title': None, 'text': '', 'urls': []}
 
     def act(self, *, profile: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self.request('POST', f'/act?profile={urllib.parse.quote(profile)}', payload, timeout=20)
+        kind = payload.get('kind')
+        target_id = str(payload.get('targetId') or '')
+        if kind == 'wait':
+            time.sleep(float(payload.get('timeMs') or 0) / 1000.0)
+            return {'ok': True}
+        if kind != 'evaluate':
+            raise RuntimeError(f'Unsupported CDP browser action kind: {kind}')
+        fn = str(payload.get('fn') or '')
+        expression = f'({fn})()'
+        cdp_result = self._send_cdp(
+            self._page_ws(target_id),
+            'Runtime.evaluate',
+            {
+                'expression': expression,
+                'awaitPromise': True,
+                'returnByValue': True,
+                'userGesture': True,
+            },
+            timeout=30,
+        )
+        if cdp_result and cdp_result.get('exceptionDetails'):
+            raise RuntimeError(f'CDP Runtime.evaluate exception: {cdp_result["exceptionDetails"]}')
+        remote = (cdp_result or {}).get('result') or {}
+        if 'value' in remote:
+            return {'result': remote.get('value')}
+        return {'result': remote.get('description') or remote.get('unserializableValue')}
 
     def close_tab(self, target_id: str, profile: str) -> None:
-        self.request('DELETE', f'/tabs/{urllib.parse.quote(target_id)}?profile={urllib.parse.quote(profile)}', timeout=10)
+        self._send_cdp(self._browser_ws(), 'Target.closeTarget', {'targetId': target_id}, timeout=10)
 
 
 def wrap_prompt(req: Request) -> str:
@@ -303,12 +359,7 @@ def _wait(client: BrowserClient, profile: str, target_id: str, ms: int) -> None:
 
 
 def _target_from_opened(opened: dict[str, Any], fallback_label: Optional[str]) -> str:
-    """Use the concrete CDP target id for Browser HTTP actions.
-
-    OpenClaw may return stable labels such as suggestedTargetId for humans and
-    tab tracking, but the HTTP /act endpoint validates against the concrete
-    targetId in recent 2026.5.x builds.
-    """
+    """Use the concrete CDP target id for page actions."""
     for key in ('targetId', 'id', 'tabId', 'suggestedTargetId', 'label'):
         value = opened.get(key)
         if value:
@@ -458,8 +509,11 @@ def _ensure_prompt_injected(client: BrowserClient, req: Request, target_id: str)
             el.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: chunk, inputType: 'insertText' }}));
           }}
         }} else {{
-          el.value = text;
-          el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+          const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) setter.call(el, text);
+          else el.value = text;
+          el.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: text, inputType: 'insertText' }}));
           el.dispatchEvent(new Event('change', {{ bubbles: true }}));
         }}
       }} catch (err) {{
@@ -467,8 +521,11 @@ def _ensure_prompt_injected(client: BrowserClient, req: Request, target_id: str)
           el.textContent = text;
           el.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: text, inputType: 'insertText' }}));
         }} else {{
-          el.value = text;
-          el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+          const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+          if (setter) setter.call(el, text);
+          else el.value = text;
+          el.dispatchEvent(new InputEvent('input', {{ bubbles: true, data: text, inputType: 'insertText' }}));
           el.dispatchEvent(new Event('change', {{ bubbles: true }}));
         }}
         return {{ok:true, method:'inject-fallback', warning:String(err), tag: el.tagName, cls: el.className}};
@@ -480,7 +537,19 @@ def _ensure_prompt_injected(client: BrowserClient, req: Request, target_id: str)
 
 def _submit_prompt(client: BrowserClient, req: Request, target_id: str) -> dict[str, Any]:
     fn = r"""() => {
-      const editor = document.querySelector('.ql-editor, rich-textarea .ql-editor, div[contenteditable="true"], textarea');
+      const isVisible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
+      };
+      const pickEditor = () => {
+        const selectors = ['.ql-editor', 'rich-textarea .ql-editor', 'div[contenteditable="true"]', 'textarea'];
+        const all = selectors.flatMap(sel => [...document.querySelectorAll(sel)]);
+        const visible = all.filter(isVisible);
+        return visible.find(el => el.isContentEditable) || visible[0] || all.find(el => el.isContentEditable) || all[0] || null;
+      };
+      const editor = pickEditor();
       if (!editor) return {ok:false, reason:'no editor'};
 
       const editorText = () => {
@@ -493,16 +562,29 @@ def _submit_prompt(client: BrowserClient, req: Request, target_id: str) -> dict[
       const sendSelectors = [
         'button.send-button',
         'button[data-test-id="send-button"]',
+        'button[data-testid="send-button"]',
+        'button[data-test-id*="send" i]',
+        'button[data-testid*="send" i]',
         '.send-button-container button',
-        'button[aria-label="发送"]',
-        'button[aria-label="Send message"]',
-        'button[aria-label="Send"]',
+        'button[aria-label*="发送" i]',
+        'button[aria-label*="提交" i]',
+        'button[aria-label*="Send" i]',
+        'button[aria-label*="Submit" i]',
+        'button:has(mat-icon[fonticon="send"])',
+        'button:has(mat-icon[data-mat-icon-name="send"])',
+        'button:has(mat-icon[fonticon="send_arrow"])',
       ];
 
       let send = null;
       for (const sel of sendSelectors) {
-        const btn = document.querySelector(sel);
-        if (btn && !btn.disabled) {
+        let btn = null;
+        try {
+          btn = [...document.querySelectorAll(sel)].find(isVisible) || null;
+        } catch {
+          btn = null;
+        }
+        const disabled = btn && (btn.disabled || btn.getAttribute('aria-disabled') === 'true' || btn.classList.contains('mat-mdc-button-disabled'));
+        if (btn && !disabled) {
           send = btn;
           break;
         }
@@ -510,12 +592,18 @@ def _submit_prompt(client: BrowserClient, req: Request, target_id: str) -> dict[
       if (!send) {
         const buttons = [...document.querySelectorAll('button,[role="button"]')];
         send = buttons.find(b => {
-          const label = ((b.getAttribute('aria-label') || b.innerText || b.textContent || '') + ' ' + (b.getAttribute('data-test-id') || '')).toLowerCase();
-          return !b.disabled && (label.includes('发送') || label.includes('send') || label.includes('submit'));
+          const label = ((b.getAttribute('aria-label') || b.innerText || b.textContent || '') + ' ' + (b.getAttribute('data-test-id') || '') + ' ' + (b.getAttribute('data-testid') || '')).toLowerCase();
+          const icon = b.querySelector('mat-icon[fonticon*="send"], mat-icon[data-mat-icon-name*="send"], [fonticon*="send"]');
+          const disabled = b.disabled || b.getAttribute('aria-disabled') === 'true' || b.classList.contains('mat-mdc-button-disabled');
+          return isVisible(b) && !disabled && (label.includes('发送') || label.includes('提交') || label.includes('send') || label.includes('submit') || !!icon);
         }) || null;
       }
 
-      if (send && !send.disabled) {
+      if (send && !send.disabled && send.getAttribute('aria-disabled') !== 'true') {
+        send.dispatchEvent(new PointerEvent('pointerdown', {bubbles:true, pointerId:1, pointerType:'mouse', isPrimary:true}));
+        send.dispatchEvent(new MouseEvent('mousedown', {bubbles:true, button:0}));
+        send.dispatchEvent(new PointerEvent('pointerup', {bubbles:true, pointerId:1, pointerType:'mouse', isPrimary:true}));
+        send.dispatchEvent(new MouseEvent('mouseup', {bubbles:true, button:0}));
         send.click();
         return {
           ok:true,
@@ -805,6 +893,22 @@ def _safe_close_tab(client: BrowserClient, profile: str, target_id: Optional[str
         debug[f'{key}Error'] = str(close_err)
 
 
+def _is_cdp_transport_error(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            'cdp request failed',
+            'cdp request timed out',
+            'cdp endpoint',
+            'target.createtarget',
+            'runtime.evaluate',
+            'connection refused',
+            'failed to establish a new connection',
+        )
+    )
+
+
 def _open_ready_tab(client: BrowserClient, req: Request, target_url: str, debug: dict[str, Any], result: Result, *, prefix: str = '') -> str:
     opened = client.open_tab(target_url, req.profile, req.tab_label)
     target_id = _target_from_opened(opened, req.tab_label)
@@ -840,11 +944,16 @@ def _submit_and_confirm(client: BrowserClient, req: Request, target_id: str, deb
 
 def execute_state_machine(req: Request) -> Result:
     result = Result(ok=False, mode=req.mode, prompt=req.prompt, wrapped_prompt=wrap_prompt(req))
-    client = BrowserClient(base_url=req.browser_base_url, token=req.browser_token, password=req.browser_password)
+    client = BrowserClient(
+        base_url=req.browser_base_url,
+        cdp_url=req.cdp_url,
+        token=req.browser_token,
+        password=req.browser_password,
+    )
     result.browserProfile = req.profile
     debug: dict[str, Any] = {
-        'baseUrl': client.base_url,
-        'authSource': client.auth_source,
+        'browserTransport': client.transport,
+        'cdpUrl': client.cdp_url,
         'browserProfile': req.profile,
         'tabLabel': req.tab_label,
     }
@@ -980,18 +1089,18 @@ def execute_state_machine(req: Request) -> Result:
     except Exception as e:
         msg = str(e)
         result.error = msg
-        if 'ACT_TARGET_ID_MISMATCH' in msg or 'action targetId must match request targetId' in msg:
+        if _is_cdp_transport_error(msg):
+            result.errorCode = 'ERR_BROWSER_CDP_UNAVAILABLE'
+            result.nextStep = 'Check `openclaw browser --browser-profile openclaw status` and `curl http://127.0.0.1:18800/json/version`, then retry.'
+        elif 'ACT_TARGET_ID_MISMATCH' in msg or 'action targetId must match request targetId' in msg:
             result.errorCode = 'ERR_BROWSER_TARGET_MISMATCH'
-            result.nextStep = 'Use the concrete OpenClaw targetId for Browser HTTP actions; inspect openedTab.targetId and tabs output.'
+            result.nextStep = 'Use the concrete OpenClaw CDP targetId; inspect openedTab.targetId and tabs output.'
         elif 'tab not found' in msg.lower():
             result.errorCode = 'ERR_TAB_NOT_FOUND'
             result.nextStep = 'Retry the run; the Gemini browser tab was closed or invalidated during execution.'
-        elif 'Browser HTTP 401' in msg or 'Unauthorized' in msg:
-            result.errorCode = 'ERR_BROWSER_UNAUTHORIZED'
-            result.nextStep = 'Provide the current OpenClaw gateway shared secret via OPENCLAW_GATEWAY_TOKEN/OPENCLAW_GATEWAY_PASSWORD or --browser-token/--browser-password, then retry.'
         elif not result.errorCode:
             result.errorCode = 'ERR_UNKNOWN_BLOCKED_STATE'
-            result.nextStep = 'Inspect local browser control service and Gemini DOM state.'
+            result.nextStep = 'Inspect local OpenClaw CDP service and Gemini DOM state.'
         return result
     finally:
         if target_id and not debug.get('closedTab'):
@@ -1008,9 +1117,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument('--report-path')
     p.add_argument('--profile', default=DEFAULT_PROFILE)
     p.add_argument('--tab-label', default='gemini-monitor')
-    p.add_argument('--browser-base-url')
-    p.add_argument('--browser-token')
-    p.add_argument('--browser-password')
+    p.add_argument('--cdp-url')
+    p.add_argument('--browser-base-url', help='Deprecated alias for --cdp-url')
+    p.add_argument('--browser-token', help='Deprecated no-op for old Browser HTTP transport')
+    p.add_argument('--browser-password', help='Deprecated no-op for old Browser HTTP transport')
     p.add_argument('--timeout-seconds', type=int, default=45)
     p.add_argument('--recovery-timeout-seconds', type=int, default=120)
     p.add_argument('--recovery-poll-ms', type=int, default=3000)
@@ -1035,6 +1145,7 @@ def build_request(args: argparse.Namespace) -> Request:
         profile=args.profile,
         tab_label=args.tab_label,
         browser_base_url=args.browser_base_url,
+        cdp_url=args.cdp_url,
         browser_token=args.browser_token,
         browser_password=args.browser_password,
     )

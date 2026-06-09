@@ -30,7 +30,7 @@ Target sequence:
 
 1. open Gemini Web
 2. label/focus the OpenClaw tab as `gemini-monitor`
-3. use stable tab labels for open/find, then concrete CDP `targetId` values for Browser HTTP actions
+3. use concrete CDP `targetId` values for page actions
 4. detect page state / auth state
 5. find the Gemini input box
 6. input the prompt with a stable strategy
@@ -44,5 +44,5 @@ Target sequence:
 - project docs now live under `docs/projects/gemini-chat/`
 - project setup is aligned with the `chatgpt-chat` template
 - implementation is available as a deterministic local runner
-- current implementation uses OpenClaw loopback Browser HTTP, with stable tab-label handling and concrete `targetId` values for actions
-- on OpenClaw 2026.5.x, provide the gateway shared secret through env, `openclaw.json`, or one-off `--browser-token` / `--browser-password` flags if the runner reports `ERR_BROWSER_UNAUTHORIZED`
+- current implementation uses OpenClaw 2026.6.x CDP transport, with stable tab-label metadata and concrete `targetId` values for actions
+- default CDP URL is `http://127.0.0.1:18800`; override with `OPENCLAW_CDP_URL` or `--cdp-url` when `openclaw browser --browser-profile openclaw status` reports a different `cdpUrl`
